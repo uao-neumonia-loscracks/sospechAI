@@ -8,7 +8,7 @@ from grpc_tools import protoc
 
 def main() -> int:
     """Compilar un descriptor temporal y devolver el resultado del compilador."""
-    source = Path(__file__).parent / "proto" / "impostor.proto"
+    source = Path(__file__).resolve().parents[1] / "proto" / "impostor.proto"
     with TemporaryDirectory() as temporary:
         output = Path(temporary) / "impostor.pb"
         status = protoc.main(

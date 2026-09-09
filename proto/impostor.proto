@@ -27,6 +27,9 @@ message GenerationConfig {
   float top_p = 2;
   int32 max_words = 3;
   string system_prompt_version = 4;
+  // Extensión aditiva del plan operativo. Requiere revisión de R1/R2.
+  string engine_backend = 5; // "hf-router" en la arquitectura actual
+  string model_id = 6; // Modelo/proveedor solicitado; no prueba el proveedor efectivo
 }
 
 message UtteranceChunk {

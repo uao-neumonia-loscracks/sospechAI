@@ -51,7 +51,7 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
         messages = self._build_messages(request)
         max_words = request.config.max_words
         parts: list[str] = []
-        emitted_words = 0
+        emitted_chars = 0
         token_index = 0
         try:
             for raw_delta in self.client.stream_chat(
@@ -66,23 +66,20 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
                 candidate = normalize_text("".join(parts))
                 if count_words(candidate) > max_words:
                     cut = cut_to_max_words(candidate, max_words)
-                    new_words = cut.split()[emitted_words:] if cut else []
-                    if new_words:
+                    if len(cut) > emitted_chars:
                         yield pb.UtteranceChunk(
-                            text_delta=self._delta_text(new_words, emitted_words),
+                            text_delta=cut[emitted_chars:],
                             token_index=token_index,
                         )
                         token_index += 1
                     break
-                words = candidate.split() if candidate else []
-                new_words = words[emitted_words:]
-                if new_words:
+                if len(candidate) > emitted_chars:
                     yield pb.UtteranceChunk(
-                        text_delta=self._delta_text(new_words, emitted_words),
+                        text_delta=candidate[emitted_chars:],
                         token_index=token_index,
                     )
                     token_index += 1
-                    emitted_words = len(words)
+                    emitted_chars = len(candidate)
         except InferenceError as error:
             self._abort_for(error, context)
         yield pb.UtteranceChunk(is_final=True, text_delta="")
@@ -96,17 +93,6 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
         model_id = self.model_id
         detail = "ok" if healthy else "falta HF_TOKEN válido o cliente no configurado"
         return pb.HealthResponse(healthy=healthy, model_id=model_id, detail=detail)
-
-    def _delta_text(self, words: list[str], emitted_words: int) -> str:
-        """Unir las palabras nuevas con un espacio inicial si ya hay texto emitido.
-
-        Los deltas se concatenan en 'join' por el cliente de R2, por lo que este
-        espacio inicial conserva la separación entre fragmentos sucesivos.
-        """
-        joined = " ".join(words)
-        if emitted_words == 0:
-            return joined
-        return " " + joined
 
     def _validate(
         self, request: pb.UtteranceRequest, context: grpc.ServicerContext

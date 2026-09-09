@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from r2_inicio.game import Game
+from src.orchestrator.game import Game
 
 
 def save_practice_game(game: Game, database: Path) -> str:

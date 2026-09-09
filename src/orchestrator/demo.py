@@ -3,8 +3,8 @@
 import argparse
 from pathlib import Path
 
-from r2_inicio.game import Game, RuleViolation
-from r2_inicio.storage import save_practice_game
+from src.orchestrator.game import Game, RuleViolation
+from src.orchestrator.storage import save_practice_game
 
 PROMPTS = (
     "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
@@ -30,7 +30,7 @@ SCRIPTED_RESPONSES = (
 
 def run_demo(*, automatic: bool, database: Path) -> None:
     """Ejecutar dos rondas con una persona en consola y tres participantes simulados."""
-    game = Game(rounds=2, max_words=15)
+    game = Game(rounds=2, max_words=15, round_timeout=None)
     aliases = [game.add_player() for _ in range(3)]
     aliases.append(game.add_player(is_ai=True))
     print("SospechAI | Inicio de R2")
@@ -95,7 +95,7 @@ def main() -> int:
     parser.add_argument(
         "--db",
         type=Path,
-        default=Path(__file__).parent / "salidas" / "partidas_demo.sqlite3",
+        default=Path("data/practice/partidas_demo.sqlite3"),
         help="Destino de SQLite para las partidas de práctica.",
     )
     options = parser.parse_args()

@@ -2,11 +2,12 @@
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from r2_inicio.game import Game, GameState, RuleViolation
-from r2_inicio.storage import save_practice_game
+from src.orchestrator.game import Game, GameState, RuleViolation
+from src.orchestrator.storage import save_practice_game
 
 
 def make_game(*, rounds: int = 1, max_words: int = 15) -> tuple[Game, list[str]]:
@@ -28,7 +29,7 @@ def reach_voting() -> tuple[Game, list[str]]:
 
 
 @pytest.mark.parametrize("humans,has_ai", [(0, False), (1, True), (3, False)])
-def test_start_requires_players_and_one_ai(humans, has_ai):
+def test_start_requires_players_and_one_ai(humans: int, has_ai: bool) -> None:
     """Una sala incompleta no inicia ni abandona el lobby."""
     game = Game()
     for _ in range(humans):
@@ -40,7 +41,7 @@ def test_start_requires_players_and_one_ai(humans, has_ai):
     assert game.state == GameState.LOBBY
 
 
-def test_second_ai_and_late_join_are_rejected():
+def test_second_ai_and_late_join_are_rejected() -> None:
     """No se admiten dos impostores ni participantes nuevos con la partida abierta."""
     game, _ = make_game()
     with pytest.raises(RuleViolation):
@@ -51,7 +52,7 @@ def test_second_ai_and_late_join_are_rejected():
     assert len(game.public_state()["players"]) == 4
 
 
-def test_rounds_wait_for_every_player_and_end_in_discussion():
+def test_rounds_wait_for_every_player_and_end_in_discussion() -> None:
     """El último mensaje de cada ronda produce una única transición válida."""
     game, aliases = make_game(rounds=2)
     game.start()
@@ -67,7 +68,7 @@ def test_rounds_wait_for_every_player_and_end_in_discussion():
 
 @pytest.mark.parametrize("player_index", [0, 3])
 @pytest.mark.parametrize("text", ["   \n", "una respuesta demasiado larga"])
-def test_message_validation_is_symmetric(player_index, text):
+def test_message_validation_is_symmetric(player_index: int, text: str) -> None:
     """Humanos e IA reciben el mismo rechazo para respuestas vacías o muy largas."""
     game, aliases = make_game(max_words=2)
     game.start()
@@ -77,7 +78,7 @@ def test_message_validation_is_symmetric(player_index, text):
 
 
 @pytest.mark.parametrize("player_index", [0, 3])
-def test_spaces_and_unicode_are_normalized_for_every_player(player_index):
+def test_spaces_and_unicode_are_normalized_for_every_player(player_index: int) -> None:
     """La normalización conserva las tildes y acepta el límite exacto de palabras."""
     game, aliases = make_game(max_words=2)
     game.start()
@@ -87,7 +88,7 @@ def test_spaces_and_unicode_are_normalized_for_every_player(player_index):
     )
 
 
-def test_duplicate_message_does_not_advance_the_round():
+def test_duplicate_message_does_not_advance_the_round() -> None:
     """Enviar dos veces no reemplaza la primera respuesta ni completa una ronda."""
     game, aliases = make_game()
     game.start()
@@ -98,7 +99,7 @@ def test_duplicate_message_does_not_advance_the_round():
     assert game.state == GameState.ROUND
 
 
-def test_actions_in_the_wrong_stage_are_rejected():
+def test_actions_in_the_wrong_stage_are_rejected() -> None:
     """La API de dominio impide saltar de lobby a mensajes, votos o resultados."""
     game, aliases = make_game()
     for action in (
@@ -112,7 +113,7 @@ def test_actions_in_the_wrong_stage_are_rejected():
     assert game.state == GameState.LOBBY
 
 
-def test_unregistered_player_cannot_send_a_message():
+def test_unregistered_player_cannot_send_a_message() -> None:
     """Una identidad desconocida no puede participar en la ronda."""
     game, _ = make_game()
     game.start()
@@ -122,7 +123,7 @@ def test_unregistered_player_cannot_send_a_message():
 
 
 @pytest.mark.parametrize("voter,suspect", [(3, 0), (0, 0), (0, None), (None, 0)])
-def test_invalid_votes_are_rejected(voter, suspect):
+def test_invalid_votes_are_rejected(voter: int | None, suspect: int | None) -> None:
     """La IA, el autovoto y los alias desconocidos no generan votos válidos."""
     game, aliases = reach_voting()
     voter_alias = aliases[voter] if voter is not None else "Desconocido"
@@ -132,7 +133,7 @@ def test_invalid_votes_are_rejected(voter, suspect):
     assert game.public_state()["votes_received"] == 0
 
 
-def test_duplicate_vote_and_early_reveal_are_rejected():
+def test_duplicate_vote_and_early_reveal_are_rejected() -> None:
     """Un jugador no puede sumar dos votos ni obtener resultados incompletos."""
     game, aliases = reach_voting()
     game.cast_vote(aliases[0], aliases[3])
@@ -148,7 +149,7 @@ def test_duplicate_vote_and_early_reveal_are_rejected():
     assert "result" not in view
 
 
-def test_last_vote_reveals_results_and_locks_the_game():
+def test_last_vote_reveals_results_and_locks_the_game() -> None:
     """La revelación es automática y el resultado cerrado ya no acepta acciones."""
     game, aliases = reach_voting()
     game.cast_vote(aliases[0], aliases[3])
@@ -166,7 +167,7 @@ def test_last_vote_reveals_results_and_locks_the_game():
         game.submit_message(aliases[0], "Mensaje tardío")
 
 
-def test_public_snapshot_cannot_mutate_the_game():
+def test_public_snapshot_cannot_mutate_the_game() -> None:
     """Modificar una copia de la vista no cambia los participantes internos."""
     game, _ = make_game()
     view = game.public_state()
@@ -176,7 +177,7 @@ def test_public_snapshot_cannot_mutate_the_game():
     assert game.public_state()["messages"] == []
 
 
-def test_sqlite_round_trip_marks_the_session_as_simulated(tmp_path):
+def test_sqlite_round_trip_marks_the_session_as_simulated(tmp_path: Path) -> None:
     """El resultado completo se recupera desde disco con su naturaleza de práctica."""
     game, aliases = reach_voting()
     for alias in aliases[:3]:
@@ -195,7 +196,7 @@ def test_sqlite_round_trip_marks_the_session_as_simulated(tmp_path):
     assert json.loads(row[1]) == game.result()
 
 
-def test_unfinished_game_is_not_saved(tmp_path):
+def test_unfinished_game_is_not_saved(tmp_path: Path) -> None:
     """No se crea una base de resultados para una partida que aún no termina."""
     game, _ = make_game()
     database = tmp_path / "incompleta.sqlite3"

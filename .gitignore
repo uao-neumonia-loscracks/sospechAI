@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Reglas del plan operativo y datos locales
+*.ipynb
+notebooks/
+*.gguf
+.env
+*.env
+mlruns/
+mlartifacts/
+mlflow.db
+data/practice/

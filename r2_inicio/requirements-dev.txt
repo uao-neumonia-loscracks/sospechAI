@@ -1,4 +1,0 @@
-black==26.5.1
-grpcio-tools==1.83.1
-pytest==9.1.1
-ruff==0.16.6

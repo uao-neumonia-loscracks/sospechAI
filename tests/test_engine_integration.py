@@ -91,6 +91,19 @@ def test_r2_client_consumes_engine_stream_over_real_grpc() -> None:
         assert EngineClient(stub).generate(request(), timeout=3) == "Hola mundo"
 
 
+def test_trailing_metadata_reaches_r2_stub() -> None:
+    """Los metadatos de observabilidad llegan al cliente al cerrar el stream."""
+    with serve(FakeStreamClient(["hola", " mundo"])) as stub:
+        call = stub.GenerateUtterance(request(), timeout=3)
+        chunks = list(call)
+        meta = dict(call.trailing_metadata())
+    assert chunks[-1].is_final
+    assert meta["x-status"] == "ok"
+    assert meta["x-attempts"] == "1"
+    assert "x-latency-total-ms" in meta
+    assert "x-latency-ttft-ms" in meta
+
+
 def test_word_cut_guard_reaches_r2_before_final_chunk() -> None:
     """Aunque el proveedor entregue más palabras, R2 nunca recibe el exceso."""
     deltas = ["palabra1"] + [f" palabra{i}" for i in range(2, 21)]

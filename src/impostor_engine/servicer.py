@@ -7,8 +7,10 @@ cliente a un estado gRPC que el cliente de R2 pueda interpretar.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
+import time
 from collections.abc import Iterator
 
 import grpc
@@ -16,9 +18,15 @@ import grpc
 from proto import impostor_pb2 as pb
 from proto import impostor_pb2_grpc as rpc
 from src.impostor_engine.guards import count_words, cut_to_max_words, normalize_text
-from src.impostor_engine.inference_client import InferenceError, StreamClient
+from src.impostor_engine.inference_client import (
+    InferenceError,
+    StreamClient,
+    estimate_cost_usd,
+)
 
 MIN_BUDGET = 0.05
+
+logger = logging.getLogger("impostor_engine")
 
 
 class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
@@ -53,6 +61,8 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
         parts: list[str] = []
         emitted_chars = 0
         token_index = 0
+        started = time.perf_counter()
+        first_delta_at: float | None = None
         try:
             for raw_delta in self.client.stream_chat(
                 messages,
@@ -62,6 +72,8 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
                 max_tokens=max_words * 3 + 8,
                 timeout=budget,
             ):
+                if first_delta_at is None:
+                    first_delta_at = time.perf_counter()
                 parts.append(raw_delta)
                 candidate = normalize_text("".join(parts))
                 if count_words(candidate) > max_words:
@@ -81,7 +93,21 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
                     token_index += 1
                     emitted_chars = len(candidate)
         except InferenceError as error:
+            self._emit_observability(
+                request,
+                context,
+                started=started,
+                first_delta_at=first_delta_at,
+                status=error.kind,
+            )
             self._abort_for(error, context)
+        self._emit_observability(
+            request,
+            context,
+            started=started,
+            first_delta_at=first_delta_at,
+            status="ok",
+        )
         yield pb.UtteranceChunk(is_final=True, text_delta="")
 
     def HealthCheck(
@@ -161,3 +187,55 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
             "rejected": grpc.StatusCode.INTERNAL,
         }.get(error.kind, grpc.StatusCode.INTERNAL)
         context.abort(status, str(error))
+
+    def _emit_observability(
+        self,
+        request: pb.UtteranceRequest,
+        context: grpc.ServicerContext,
+        *,
+        started: float,
+        first_delta_at: float | None,
+        status: str,
+    ) -> None:
+        """Registrar uso, latencia y estado como metadatos y log al cerrar el stream."""
+        ttft_ms = (
+            (first_delta_at - started) * 1000 if first_delta_at is not None else 0.0
+        )
+        total_ms = (time.perf_counter() - started) * 1000
+        usage = getattr(self.client, "last_usage", {}) or {}
+        attempts = getattr(self.client, "attempts", 1)
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        cached_tokens = int(usage.get("cached_tokens", 0))
+        cost_usd = estimate_cost_usd(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+        )
+        metadata = [
+            ("x-usage-prompt-tokens", str(prompt_tokens)),
+            ("x-usage-completion-tokens", str(completion_tokens)),
+            ("x-usage-cached-tokens", str(cached_tokens)),
+            ("x-latency-ttft-ms", f"{ttft_ms:.1f}"),
+            ("x-latency-total-ms", f"{total_ms:.1f}"),
+            ("x-attempts", str(attempts)),
+            ("x-model-id", request.config.model_id),
+            ("x-status", status),
+        ]
+        try:
+            context.set_trailing_metadata(metadata)
+        except TypeError:
+            pass
+        logger.info(
+            "utterance status=%s model=%s attempts=%d ttft_ms=%.1f total_ms=%.1f "
+            "prompt_tokens=%d completion_tokens=%d cached_tokens=%d cost_usd=%.6f",
+            status,
+            request.config.model_id,
+            attempts,
+            ttft_ms,
+            total_ms,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            cost_usd,
+        )

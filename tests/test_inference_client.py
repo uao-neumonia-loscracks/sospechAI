@@ -4,7 +4,11 @@ import io
 
 import pytest
 
-from src.impostor_engine.inference_client import InferenceClient, InferenceError
+from src.impostor_engine.inference_client import (
+    InferenceClient,
+    InferenceError,
+    estimate_cost_usd,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -298,3 +302,43 @@ def test_sent_request_builds_openai_body(monkeypatch) -> None:
     headers = dict(req.header_items())
     assert headers["User-agent"] == "sospechai-engine/0.1 (curso UAO 2026-2)"
     assert headers["Content-type"] == "application/json"
+
+
+def test_attempts_counts_single_success(monkeypatch) -> None:
+    """Una llamada exitosa cuenta exactamente un intento."""
+    body = sse(*content_chunks("hola"))
+    opener = FakeOpener([FakeResponse(body)])
+    monkeypatch.setattr("urllib.request.urlopen", opener)
+    client = InferenceClient(timeout=30.0)
+    list(
+        client.stream_chat(
+            messages=[{"role": "user", "content": "p"}], model_id="m", max_tokens=1
+        )
+    )
+    assert client.attempts == 1
+
+
+def test_attempts_counts_retry_when_send_failure(monkeypatch) -> None:
+    """Un fallo de red previo al envío seguido de éxito cuenta dos intentos."""
+    first = ConnectionRefusedError("conexión rechazada")
+    body = sse(*content_chunks("hola"))
+    opener = FakeOpener([first, FakeResponse(body)])
+    monkeypatch.setattr("urllib.request.urlopen", opener)
+    client = InferenceClient(timeout=30.0)
+    deltas = list(
+        client.stream_chat(
+            messages=[{"role": "user", "content": "p"}], model_id="m", max_tokens=1
+        )
+    )
+    assert deltas == ["hola"]
+    assert client.attempts == 2
+
+
+def test_estimate_cost_usd() -> None:
+    """El costo estimado sigue las tarifas publicadas por millón de tokens."""
+    assert estimate_cost_usd(prompt_tokens=1_000_000, completion_tokens=0) == 0.17
+    assert estimate_cost_usd(prompt_tokens=0, completion_tokens=1_000_000) == 0.20
+    expected = 42 * 0.17e-6 + 17 * 0.20e-6
+    assert estimate_cost_usd(prompt_tokens=42, completion_tokens=17) == pytest.approx(
+        expected
+    )

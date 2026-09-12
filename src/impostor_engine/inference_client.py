@@ -21,6 +21,21 @@ from urllib import error, request
 ROUTER_BASE = "https://router.huggingface.co/v1"
 USER_AGENT = "sospechai-engine/0.1 (curso UAO 2026-2)"
 
+INPUT_PRICE_PER_1M = 0.17
+OUTPUT_PRICE_PER_1M = 0.20
+CACHED_PRICE_PER_1M = 0.136
+
+
+def estimate_cost_usd(
+    *, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0
+) -> float:
+    """Estimar el costo en USD de una llamada según tarifas publicadas."""
+    return (
+        prompt_tokens * INPUT_PRICE_PER_1M
+        + completion_tokens * OUTPUT_PRICE_PER_1M
+        + cached_tokens * CACHED_PRICE_PER_1M
+    ) / 1_000_000
+
 
 class StreamClient(Protocol):
     """Interfaz mínima que el servicer exige a su cliente de inferencia."""
@@ -67,6 +82,7 @@ class InferenceClient:
         self.timeout = timeout
         self.token = token
         self.last_usage: dict[str, object] = {}
+        self.attempts: int = 0
 
     def _bearer(self) -> str:
         """Resolver el token en el momento de la llamada desde HF_TOKEN."""
@@ -96,6 +112,7 @@ class InferenceClient:
         """
         token = self._bearer()
         self.last_usage = {}
+        self.attempts = 0
         budget = timeout if timeout is not None else self.timeout
         if not math.isfinite(budget) or budget <= 0:
             raise InferenceError("timeout", "Presupuesto no válido.")
@@ -120,6 +137,7 @@ class InferenceClient:
         """Ejecutar un intento único; reintentar solo fallos de red previos al envío."""
         retried = False
         while True:
+            self.attempts += 1
             try:
                 self._read_stream(
                     token,

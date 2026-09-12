@@ -42,10 +42,15 @@ class FakeContext:
         """Fijar el presupuesto y preparar el registro de aborts."""
         self.remaining = remaining
         self.aborted: list[tuple] = []
+        self.trailing_metadata: list[tuple[str, str]] | None = None
 
     def time_remaining(self) -> float:
         """Devolver el presupuesto configurado."""
         return self.remaining
+
+    def set_trailing_metadata(self, metadata) -> None:
+        """Guardar los metadatos tal como los envía el servidor."""
+        self.trailing_metadata = list(metadata)
 
     def abort(self, code, details: str):
         """Registrar el abort simulando la excepción real de gRPC."""
@@ -230,6 +235,35 @@ def test_no_chunks_after_final() -> None:
     chunks = list(servicer.GenerateUtterance(request(), FakeContext()))
     assert chunks[-1].is_final
     assert all(not c.is_final for c in chunks[:-1])
+
+
+def test_happy_path_emits_trailing_metadata() -> None:
+    """El camino feliz emite metadatos de uso y latencia al cerrar el stream."""
+    client = FakeStreamClient(["hola", " mundo"])
+    servicer = ImpostorEngineServicer(client)
+    context = FakeContext()
+    list(servicer.GenerateUtterance(request(), context))
+    assert context.trailing_metadata is not None
+    meta = dict(context.trailing_metadata)
+    assert meta["x-status"] == "ok"
+    assert meta["x-attempts"] == "1"
+    assert meta["x-usage-completion-tokens"] == "3"
+    assert meta["x-model-id"] == "test/model:provider"
+    assert "x-latency-total-ms" in meta
+
+
+def test_error_emits_trailing_metadata_with_status() -> None:
+    """El camino de error emite el estado del fallo antes de abortar."""
+    client = FakeStreamClient([], error=InferenceError("credits", "agotado"))
+    servicer = ImpostorEngineServicer(client)
+    context = FakeContext()
+    with pytest.raises(RuntimeError):
+        list(servicer.GenerateUtterance(request(), context))
+    assert context.aborted[0][0].name == "RESOURCE_EXHAUSTED"
+    assert context.trailing_metadata is not None
+    meta = dict(context.trailing_metadata)
+    assert meta["x-status"] == "credits"
+    assert meta["x-attempts"] == "1"
 
 
 def test_health_check_healthy_when_configured(monkeypatch) -> None:

@@ -73,12 +73,13 @@ def request() -> pb.UtteranceRequest:
     """Petición válida para estas pruebas; el modelo no se toca en loopback."""
     return pb.UtteranceRequest(
         room_id="practice",
+        persona_id="p1",
         prompt="¿Qué comiste?",
         config=pb.GenerationConfig(
             temperature=0.9,
             top_p=0.9,
             max_words=15,
-            system_prompt_version="abc1234",
+            system_prompt_version="v2",
             engine_backend="hf-router",
             model_id="test/model:provider",
         ),
@@ -89,6 +90,19 @@ def test_r2_client_consumes_engine_stream_over_real_grpc() -> None:
     """El cliente real de R2 une los deltas y acepta el cierre vacío."""
     with serve(FakeStreamClient(["Hola", " mundo"])) as stub:
         assert EngineClient(stub).generate(request(), timeout=3) == "Hola mundo"
+
+
+def test_trailing_metadata_reaches_r2_stub() -> None:
+    """Los metadatos de observabilidad llegan al cliente al cerrar el stream."""
+    with serve(FakeStreamClient(["hola", " mundo"])) as stub:
+        call = stub.GenerateUtterance(request(), timeout=3)
+        chunks = list(call)
+        meta = dict(call.trailing_metadata())
+    assert chunks[-1].is_final
+    assert meta["x-status"] == "ok"
+    assert meta["x-attempts"] == "1"
+    assert "x-latency-total-ms" in meta
+    assert "x-latency-ttft-ms" in meta
 
 
 def test_word_cut_guard_reaches_r2_before_final_chunk() -> None:

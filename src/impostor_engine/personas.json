@@ -1,0 +1,5 @@
+{
+  "p1": { "alias": "Pipe", "edad": 22, "ciudad": "Cali", "ocupacion": "estudiante de ingeniería" },
+  "p2": { "alias": "Valen", "edad": 24, "ciudad": "Medellín", "ocupacion": "auxiliar de laboratorio" },
+  "p3": { "alias": "Santi", "edad": 27, "ciudad": "Bogotá", "ocupacion": "mesero de noche" }
+}

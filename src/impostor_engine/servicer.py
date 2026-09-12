@@ -23,6 +23,7 @@ from src.impostor_engine.inference_client import (
     StreamClient,
     estimate_cost_usd,
 )
+from src.impostor_engine.prompt_store import PromptStore, PromptStoreError
 
 MIN_BUDGET = 0.05
 
@@ -37,14 +38,16 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
         client: StreamClient,
         *,
         system_prompt: str | None = None,
+        prompt_store: PromptStore | None = None,
         round_timeout: float = 8.0,
         model_id: str = "",
     ) -> None:
-        """Configurar el cliente, el prompt de sistema estático y el presupuesto."""
+        """Configurar el cliente, el store de prompts y el presupuesto."""
         if not math.isfinite(round_timeout) or round_timeout <= 0:
             raise ValueError("round_timeout debe ser finito y positivo.")
         self.client = client
         self.system_prompt = system_prompt
+        self.prompt_store = prompt_store or PromptStore()
         self.round_timeout = round_timeout
         self.model_id = model_id
 
@@ -53,10 +56,21 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
     ) -> Iterator[pb.UtteranceChunk]:
         """Validar la petición y emitir el stream con las guardas aplicadas."""
         self._validate(request, context)
+        if self.system_prompt:
+            system_content = self.system_prompt
+        else:
+            try:
+                system_content = self.prompt_store.render_prompt(
+                    persona_id=request.persona_id,
+                    version=request.config.system_prompt_version,
+                    max_words=request.config.max_words,
+                )
+            except PromptStoreError as error:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
         budget = self._budget(context)
         if budget <= MIN_BUDGET:
             context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "sin presupuesto")
-        messages = self._build_messages(request)
+        messages = self._build_messages(request, system_content)
         max_words = request.config.max_words
         parts: list[str] = []
         emitted_chars = 0
@@ -159,17 +173,21 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
             ctx_remaining = self.round_timeout
         return max(0.0, min(self.round_timeout, ctx_remaining))
 
-    def _build_messages(self, request: pb.UtteranceRequest) -> list[dict]:
+    def _build_messages(
+        self, request: pb.UtteranceRequest, system_content: str | None
+    ) -> list[dict]:
         """Construir el prompt; el historial se simplifica a roles alternos.
 
-        No podemos conocer el alias de la persona que genera, así que el
-        historial se emite de forma determinista con el primer mensaje en rol
-        'user', el segundo en 'assistant', y así sucesivamente. Es una
-        simplificación honesta; no adivinamos identidades.
+        El contenido de sistema llega resuelto desde el store versionado o
+        desde el override estático del constructor. No podemos conocer el
+        alias de la persona que genera, así que el historial se emite de
+        forma determinista con el primer mensaje en rol 'user', el segundo
+        en 'assistant', y así sucesivamente. Es una simplificación honesta;
+        no adivinamos identidades.
         """
         messages: list[dict] = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
         for index, message in enumerate(request.history):
             role = "user" if index % 2 == 0 else "assistant"
             messages.append({"role": role, "content": message.text})

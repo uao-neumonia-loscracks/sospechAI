@@ -73,7 +73,7 @@ def request(**overrides) -> pb.UtteranceRequest:
             temperature=0.9,
             top_p=0.9,
             max_words=15,
-            system_prompt_version="abc1234",
+            system_prompt_version="v2",
             engine_backend="hf-router",
             model_id="test/model:provider",
         ),
@@ -112,13 +112,14 @@ def test_word_cut_stops_at_max_words_and_never_exceeds() -> None:
     assert chunks[-1].is_final and chunks[-1].text_delta == ""
 
 
-def test_missing_system_prompt_omits_system_message() -> None:
-    """Sin system_prompt configurado no se envía mensaje de sistema."""
+def test_missing_override_resolves_prompt_from_store() -> None:
+    """Sin override estático, el contenido de sistema se resuelve desde el store."""
     client = FakeStreamClient(["hola"])
     servicer = ImpostorEngineServicer(client)  # system_prompt None por defecto
     list(servicer.GenerateUtterance(request(), FakeContext()))
     messages = client.calls[0]["messages"]
-    assert all(msg["role"] != "system" for msg in messages)
+    assert messages[0]["role"] == "system"
+    assert "Eres Pipe" in messages[0]["content"]
 
 
 def test_system_prompt_is_sent_when_configured() -> None:
@@ -128,6 +129,40 @@ def test_system_prompt_is_sent_when_configured() -> None:
     list(servicer.GenerateUtterance(request(), FakeContext()))
     messages = client.calls[0]["messages"]
     assert messages[0] == {"role": "system", "content": "Sé el impostor."}
+
+
+def test_resolved_system_prompt_is_preferred_over_static() -> None:
+    """El override estático gana sobre el contenido resuelto por el store."""
+    client = FakeStreamClient(["hola"])
+    servicer = ImpostorEngineServicer(client, system_prompt="Sé el impostor.")
+    list(servicer.GenerateUtterance(request(), FakeContext()))
+    messages = client.calls[0]["messages"]
+    assert messages[0]["content"] == "Sé el impostor."
+
+
+def test_unknown_persona_aborts_before_calling_client() -> None:
+    """Una persona inexistente aborta con INVALID_ARGUMENT sin tocar el cliente."""
+    req = request()
+    req.persona_id = "nope"
+    client = FakeStreamClient(["hola"])
+    servicer = ImpostorEngineServicer(client)
+    context = FakeContext()
+    with pytest.raises(RuntimeError):
+        list(servicer.GenerateUtterance(req, context))
+    assert context.aborted[0][0].name == "INVALID_ARGUMENT"
+    assert client.calls == []
+
+
+def test_unknown_version_aborts_before_calling_client() -> None:
+    """Una versión inexistente aborta con INVALID_ARGUMENT sin tocar el cliente."""
+    req = request(config={"system_prompt_version": "v9"})
+    client = FakeStreamClient(["hola"])
+    servicer = ImpostorEngineServicer(client)
+    context = FakeContext()
+    with pytest.raises(RuntimeError):
+        list(servicer.GenerateUtterance(req, context))
+    assert context.aborted[0][0].name == "INVALID_ARGUMENT"
+    assert client.calls == []
 
 
 def test_history_emitted_as_alternating_roles_starting_user() -> None:

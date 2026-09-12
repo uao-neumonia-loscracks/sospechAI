@@ -73,12 +73,13 @@ def request() -> pb.UtteranceRequest:
     """Petición válida para estas pruebas; el modelo no se toca en loopback."""
     return pb.UtteranceRequest(
         room_id="practice",
+        persona_id="p1",
         prompt="¿Qué comiste?",
         config=pb.GenerationConfig(
             temperature=0.9,
             top_p=0.9,
             max_words=15,
-            system_prompt_version="abc1234",
+            system_prompt_version="v2",
             engine_backend="hf-router",
             model_id="test/model:provider",
         ),

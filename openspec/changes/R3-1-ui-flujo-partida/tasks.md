@@ -1,0 +1,90 @@
+# Tasks: R3-1 — Flujo de partida en la UI (consentimiento, lobby, sala de chat, votación)
+
+## Review Workload Forecast
+
+| Field | Value |
+|-------|-------|
+| Estimated changed lines | ~1100 authored (13 ficheros nuevos en `src/ui/` + 3 ficheros de test; `uv.lock` excluido del conteo de riesgo por ser generado) |
+| 400-line budget risk | High |
+| Chained PRs recommended | Yes |
+| Suggested split | PR 1 «esqueleto navegable» → PR 2 «contenido + FakeSospechAI» → PR 3 «HttpSospechAI» |
+| Delivery strategy | ask-on-risk |
+| Chain strategy | pending |
+
+Decision needed before apply: No (usuario eligió stacked-to-main el 2026-09-16)
+Chained PRs recommended: Yes
+Chain strategy: stacked-to-main
+400-line budget risk: High
+
+### Suggested Work Units
+
+| Unit | Goal | Likely PR | Focused test command | Runtime harness | Rollback boundary |
+|------|------|-----------|----------------------|-----------------|-------------------|
+| 1 | Esqueleto navegable: dependencia `streamlit`, router por `session_state`, 4 pantallas placeholder y smoke de arranque. Esqueleto primero, antes del contenido. | PR 1 | `uv run pytest tests/test_ui_router.py` | `uv run streamlit run src/ui/app.py` — las 4 pantallas navegables end-to-end (consentimiento → lobby → chat → votación) aunque sean placeholder; sin aceptar el consentimiento no se entra al lobby. | `git revert` del commit que añade `streamlit` + `uv sync`; eliminar `src/ui/` y `tests/test_ui_router.py`. |
+| 2 | Contenido contra `api.py` con `FakeSospechAI`: `words.py`, facade, máquina congelada, contador con bloqueo local, contenido de pantallas y polling. Plan B para el piloto del 16. | PR 2 | `uv run pytest tests/test_ui_words.py tests/test_ui_api.py tests/test_ui_router.py` | `uv run streamlit run src/ui/app.py` con `SOSPECHAI_UI_SOURCE=fake` (por defecto) — dos pestañas comparten sala por `room_code`; el contador bloquea sobre `max_words`; los estados recorren `LOBBY → RONDA → DISCUSION → VOTACION → REVELACION`. | Eliminar `src/ui/api.py`, `src/ui/sources/`, `src/ui/words.py`, `tests/test_ui_words.py`, `tests/test_ui_api.py` y revertir el contenido de `src/ui/screens/*`/`src/ui/app.py` a los stubs de PR 1; PR 1 intacto. |
+| 3 | `HttpSospechAI` con stdlib `urllib` e integración HTTP contra un `ThreadingHTTPServer` local conforme al contrato. Swap `SOSPECHAI_UI_SOURCE=http` listo para cuando exista R2. | PR 3 | `uv run pytest tests/test_ui_api.py -m integration` | N/A — el servidor HTTP real del orquestador (R2) no existe aún en `main`; la verificación de cable (cabecera `X-Session-Token`, códigos 201/200/204, errores parseados por `code`) se cubre con el `ThreadingHTTPServer` local de la prueba de integración. | Eliminar `src/ui/sources/http.py` y revertir el wiring `http` en `src/ui/api.py`; PR 1/PR 2 intactos. |
+
+Nota de cadena: si el usuario elige `feature-branch-chain`, PR 1 tendría como base la rama tracker `feature/r3-1-ui-flujo-partida`; PR 2 tendría como base la rama de PR 1; PR 3, la rama de PR 2. Si un PR hijo mostrara cambios del PR anterior, se re-apunta o re-basé antes de revisar. Hasta que el orquestador pregunte al usuario (estrategia de entrega `ask-on-risk`), `Chain strategy: pending`.
+
+## Phase 1: Esqueleto navegable (esqueleto primero)
+
+- [x] 1.1 **Dependencia `streamlit` vía `uv` (D8, UIF-12)** — Ejecutar `uv add streamlit` para añadirlo a `dependencies` en `pyproject.toml` y regenerar `uv.lock`. Verificar `uv sync` sin errores y que no se usó `pip` directo. Verificar que la versión instalada soporta `st.fragment(run_every=...)` y `st.rerun(scope="app")`; si no, elevar el mínimo en `pyproject.toml`. Referencia de reglas: `AGENTS.md` (read-only).
+- [x] 1.2 **Crear `src/ui/__init__.py`** — Fichero vacío con docstring de módulo para marcar `src/ui/` como paquete.
+- [x] 1.3 **RED — Router: transición y frecuencia (UIF-02/06/09)** — Escribir en `tests/test_ui_router.py` pruebas AAA (Arrange-Act-Assert) para `resolve_screen` y `poll_interval_seconds`: sin consentimiento siempre `CONSENT` aunque haya `state`; tras aceptar, `None`/`LOBBY` → `LOBBY`, `RONDA`/`DISCUSION` → `CHAT`, `VOTACION`/`REVELACION` → `VOTING`; frecuencia `1.0` en `RONDA`/`DISCUSION`/`VOTACION` y `2.5` en `LOBBY`/`REVELACION`. Verificar que fallan (módulo ausente).
+- [x] 1.4 **GREEN — Crear `src/ui/router.py`** — Implementar `Screen(StrEnum)`, `resolve_screen(*, consent_agreed, state) -> Screen` (el consentimiento nunca se salta por estado) y `poll_interval_seconds(state) -> float` con los valores de cable del contrato (`LOBBY`, `RONDA`, `DISCUSION`, `VOTACION`, `REVELACION`), copiados de `docs/CONTRATO_UI_ORQUESTADOR.md` §§5,7,14.1 (read-only). Cero imports de `st`. Verificado con `uv run pytest tests/test_ui_router.py`.
+- [x] 1.5 **RED — Smoke de arranque (UIF-01/09)** — Añadir a `tests/test_ui_router.py` una prueba de importación y pantalla inicial: `import src.ui.app` y los módulos `src.ui.screens.consent`, `src.ui.screens.lobby`, `src.ui.screens.chat`, `src.ui.screens.voting` importan limpio, y `resolve_screen(consent_agreed=False, state=None) == Screen.CONSENT`. Verificar que falla (los módulos aún no existen).
+- [x] 1.6 **GREEN — Crear las cuatro pantallas placeholder (D2, UIF-08/09)** — Crear `src/ui/screens/__init__.py` y `src/ui/screens/consent.py`, `src/ui/screens/lobby.py`, `src/ui/screens/chat.py`, `src/ui/screens/voting.py`, cada una con un `render(ctx)` mínimo de presentación (sin reglas de juego): `voting.py` es un placeholder navegable sin controles ni resultados. Mantener cada pantalla bajo ~40 líneas; si una supera el límite por los avisos fijos de consentimiento, justificar por escrito en el docstring. `src/ui/screens/__init__.py` exporta `render` de cada pantalla.
+- [x] 1.7 **GREEN — Crear `src/ui/app.py` (D1, UIF-02/09)** — Entry point de Streamlit: guard `if __name__ == "__main__": main()`, router por `st.session_state` con las claves `consent_accepted` (bool), `room_identity` (`RoomIdentity | None`) y `snapshot` (`StateSnapshot | None`), y composición mínima: `main()` decide la pantalla con `resolve_screen` y renderiza el placeholder correspondiente. Sin usar `st.navigation` ni `pages/`. Verificado con `uv run pytest tests/test_ui_router.py` (smoke en verde).
+
+## Phase 2: Contenido — api.py, fuentes y lógica pura
+
+- [ ] 2.1 **RED — Contador y límite (D5, UIF-04/11)** — Escribir en `tests/test_ui_words.py` pruebas AAA de `count_words` y `within_limit`: texto vacío → `0`; acento NFC (`"cafe\u0301"` → `1`); múltiples espacios y puntuación; `within_limit(15, 15)` True y `within_limit(16, 15)` False (bloqueo sobre `max_words=15`). Referencia de normalización del dominio: `src/orchestrator/game.py:49` (read-only). Verificar que fallan (módulo ausente).
+- [ ] 2.2 **GREEN — Crear `src/ui/words.py` (D5)** — Implementar `count_words(text) -> int` (normalización NFC + unificación de espacios + `split`, réplica local del dominio; cero imports de `st`) y `within_limit(words, max_words) -> bool`. Verificado con `uv run pytest tests/test_ui_words.py`.
+- [ ] 2.3 **RED — Formas y máquina del fake (UIF-07)** — Escribir en `tests/test_ui_api.py` pruebas AAA de `FakeSospechAI` sin red: `public_state()` con las claves exactas del contrato (`state`, `round_number`, `rounds`, `max_words`, `players`, `messages`, `votes_received`, `remaining_seconds` y `result` solo en `REVELACION`); recorrido en orden exacto `LOBBY → RONDA → DISCUSION → VOTACION → REVELACION`; alias «Jugador N» por orden de inserción con la IA como último alias; errores del catálogo §8 (`too_many_words`, `wrong_state`, `invalid_roster`, `forbidden_host_action`, `session_expired`…). Verificar que fallan.
+- [ ] 2.4 **GREEN — Crear `src/ui/sources/__init__.py` y `src/ui/sources/fake.py` (D3)** — Implementar `FakeSospechAI` in-memory conforme al contrato: almacén compartido a nivel de módulo por `room_code` (normalizado a mayúsculas), máquina congelada §5, formas literales de `public_state()`/`result()` (§7), catálogo de errores §8 y alias «Jugador N» con la IA en último lugar tras `start`. Valores de cable tomados de `docs/CONTRATO_UI_ORQUESTADOR.md` §§5-8 (read-only); recursos del guion del piloto según `src/orchestrator/demo.py` (read-only, no se importa). `src/ui/sources/__init__.py` exporta `FakeSospechAI`.
+- [ ] 2.5 **GREEN — Crear `src/ui/api.py` (D3, UIF-07/10)** — Definir `RoomIdentity`, `ChatMessage`, `StateSnapshot` (frozen dataclasses, con `StateSnapshot.from_mapping`), `ApiError(code, http_status, message)` (se ramifica por `code`, nunca por `message`), el Protocol `SospechAI` y el facade de módulo (`create_room`, `join_room`, `get_state`, `start`, `open_voting`, `submit_message`) + selector privado `_source() -> SospechAI` que lee la variable de entorno `SOSPECHAI_UI_SOURCE` (`fake` por defecto; el swap a HTTP real es localizado aquí, las pantallas no cambian). Sin importar nada de `src/orchestrator/` ni `src/impostor_engine/` (UIF-10). Verificado con `uv run pytest tests/test_ui_api.py`.
+- [ ] 2.6 **RED — Bloqueo por límite combinado (UIF-04/05)** — Añadir a `tests/test_ui_api.py` pruebas AAA del comportamiento de envío sobre el fake + `within_limit`: mensaje dentro del límite aceptado (sin error) y visible en `messages`; sobre el límite, el facade lanza `ApiError(code="too_many_words", http_status=400, ...)` y el mensaje NO aparece en la conversación. Verificar que fallan.
+- [ ] 2.7 **RED — Integración `HttpSospechAI` contra servidor local (UIF-06/07)** — Añadir a `tests/test_ui_api.py`, marcadas `@pytest.mark.integration`, pruebas AAA contra un `ThreadingHTTPServer` stdlib local en `127.0.0.1:<puerto efímero>`: presencia de la cabecera `X-Session-Token` en cada petición; mapeo 201/200/204 a identidad/estado/acciones; respuestas no-2xx parseadas como `ApiError` por `code` (p. ej. `too_many_words`, `session_expired`); error de red → `ApiError("internal", 500, ...)` sin detalle del proveedor. Verificar que fallan.
+- [ ] 2.8 **GREEN — Crear `src/ui/sources/http.py` (D3)** — Implementar `HttpSospechAI` con stdlib `urllib`: `POST /rooms`, `POST /rooms/{code}/join`, `GET /rooms/{code}/state`, `POST /rooms/{code}/start`, `POST /rooms/{code}/voting/open`, `POST /rooms/{code}/messages`, siempre con `X-Session-Token` (salvo crear/unirse), `room_code` normalizado a mayúsculas, y 2xx/error mapeados a `ApiError` por `code`. Exportarlo desde `src/ui/sources/__init__.py` y cablear `_source()` para `SOSPECHAI_UI_SOURCE=http` con base URL en `SOSPECHAI_ORCHESTRATOR_URL`. Verificado con `uv run pytest tests/test_ui_api.py -m integration`.
+- [ ] 2.9 **REFACTOR — Conteo sin duplicados (UIF-11, AGENTS)** — Verificar que la única lógica de conteo de la UI vive en `src/ui/words.py` (`count_words`/`within_limit`) y que ninguna pantalla replica el conteo; consolidar cualquier duplicado detectado en `src/ui/screens/chat.py` hacia `words.py`. Regla de referencia: `AGENTS.md` (read-only, «la normalización vive en UNA sola función»).
+
+## Phase 3: Contenido de pantallas y polling (integración)
+
+- [ ] 3.1 **Pantalla de consentimiento (D2, UIF-02)** — En `src/ui/screens/consent.py`, completar `render(ctx)` con los dos avisos fijos (un participante puede ser un modelo de lenguaje; la conversación se registra con fines de investigación) y botón de aceptación. Cero aceptación ⇒ no se avanza: el avance lo decide `resolve_screen` en `src/ui/app.py`, no esta pantalla. Verificado con el harness del piloto (Unit 1).
+- [ ] 3.2 **Lobby (D2, UIF-03)** — En `src/ui/screens/lobby.py`, completar `render(ctx)`: mostrar `room_code` y el alias «Jugador N» proveniente de `RoomIdentity.alias` (asignado por el servidor); unirse por código (fake comparte sala por `room_code`) y `start` solo para el anfitrión; sin campos de nombre real ni correo y sin entrada de alias (el cliente nunca envía alias; el servidor lo liga al token). Verificado con `uv run pytest tests/test_ui_api.py` + harness del piloto.
+- [ ] 3.3 **Sala de chat (D2, UIF-04/05)** — En `src/ui/screens/chat.py`, completar `render(ctx)`: mensajes por alias desde `ctx.snapshot.messages` (la UI nunca agrega mensajes localmente); campo de entrada de texto; contador en vivo `count_words(text)` que se actualiza con cada cambio sin enviar; botón de enviar **deshabilitado con aviso evidente** cuando `not within_limit(count_words(text), snapshot.max_words)`; el límite se lee siempre de la última instantánea (`snapshot.max_words`). Si el orquestador rechaza con `ApiError(code="too_many_words")`, mostrar el motivo y no presentar el mensaje como entregado (no aparece en la conversación). Verificado con `uv run pytest tests/test_ui_words.py tests/test_ui_api.py` + harness del piloto.
+- [ ] 3.4 **Votación vacía y placeholder REVELACION (D2, UIF-08)** — En `src/ui/screens/voting.py`, completar el placeholder: vista de votación navegable sin controles de votación ni resultados (son R3-2) y sin renderizar ninguna clave de `result` cuando `state == "REVELACION"`. Verificado con `uv run pytest tests/test_ui_router.py` (transición `VOTACION`/`REVELACION` → `VOTING`) + harness del piloto.
+- [ ] 3.5 **Polling no bloqueante con frecuencias por estado (D4, UIF-06)** — En `src/ui/app.py`, declarar el ciclo de polling en un fragment `st.fragment(run_every=poll_interval_seconds(snapshot.state))` envuelto en un wrapper local que aísla la API de Streamlit: cada tick llama `api.get_state(room_code, session_token)` (cabecera `X-Session-Token`), guarda `session_state["snapshot"]`, recalcula `resolve_screen`; si la pantalla cambió, `st.rerun(scope="app")`; si no, re-renderiza en su lugar. Frecuencias: `1.0` s en `RONDA`/`DISCUSION`/`VOTACION`, `2.5` s (banda 2–3) en `LOBBY`/`REVELACION`. Degradación según contrato §14.1 (`docs/CONTRATO_UI_ORQUESTADOR.md`, read-only): si la versión de `streamlit` no soporta `run_every`/`scope`, el wrapper degrada al refresco manual sin cambiar las pantallas. Cierre de sala = un poll devuelve `state == "REVELACION"` con `result` embebido (la presentación es R3-2). Verificado con `uv run pytest tests/test_ui_router.py` (frecuencias) + harness del piloto.
+- [ ] 3.6 **IA anónima e idéntica (D6, UIF-03)** — En `src/ui/screens/lobby.py` (lista de jugadores), renderizar la lista plana y homogénea: la IA es un «Jugador N» más, sin etiqueta «IA» ni énfasis de posición (contrato §14.3). La UI no dibuja ni `is_ai`, `impostor_alias`, `votes`, `scores` ni `tasa_deteccion`, y el placeholder de REVELACION no renderiza ninguna clave de `result` (UIF-08). Verificado con `uv run pytest tests/test_ui_api.py` (alias «Jugador N», IA en último lugar) + inspección manual del render.
+
+## Phase 4: Verificación (criterios de éxito de la propuesta)
+
+- [ ] 4.1 **Suite completa con cero warnings (UIF-11)** — Ejecutar `uv run pytest` con `filterwarnings = ["error"]` ya configurada en `pyproject.toml` (read-only salvo la entrada de `streamlit` de la tarea 1.1): la suite termina en verde sin emitir ningún warning, incluido el código nuevo de `src/ui/` y `tests/test_ui_*.py`.
+- [ ] 4.2 **Estilo limpio (UIF-11)** — Ejecutar `uv run ruff check` y `uv run black --check`: sin hallazgos en el código nuevo (docstrings y type hints en todas las funciones públicas).
+- [ ] 4.3 **Harness manual del piloto** — Ejecutar `uv run streamlit run src/ui/app.py` y validar: arranque sin errores; las 4 pantallas navegables end-to-end; no se entra al lobby sin aceptar el consentimiento; el contador bloquea sobre el límite; dos pestañas comparten sala por `room_code` con `SOSPECHAI_UI_SOURCE=fake`. Prueba manual; no automatizada (no hay E2E de navegador en la suite).
+- [ ] 4.4 **Aditivo a los árboles existentes (UIF-10)** — Ejecutar `git status --short` y verificar que solo aparecen los ficheros planificados (nuevos en `src/ui/` y `tests/`, modificados `pyproject.toml` y `uv.lock`) y que no hay cambios en `src/orchestrator/` ni `src/impostor_engine/`.
+
+## Trazabilidad (cross-check)
+
+| Requisito / Decisión | Tareas |
+|----------------------|--------|
+| UIF-01 Arranque limpio; primera pantalla consentimiento | 1.5, 1.7, 4.1, 4.3 |
+| UIF-02 Consentimiento obligatorio, no saltable por URL | 1.3, 1.4, 1.7, 3.1 |
+| UIF-03 Lobby con alias del servidor, cero datos personales, IA en último lugar | 3.2, 3.6 |
+| UIF-04 Chat con alias, contador en vivo y bloqueo local | 2.1, 2.2, 2.6, 3.3 |
+| UIF-05 Autoridad del orquestador; `too_many_words` mostrado | 2.6, 3.3 |
+| UIF-06 Polling corto con frecuencias y sin bloqueo | 1.4 (frecuencias), 2.7, 2.8, 3.5 |
+| UIF-07 Una sola boca `api.py`; fake conforme e intercambiable | 2.3, 2.4, 2.5, 2.7, 2.8 |
+| UIF-08 Vista de votación vacía navegable | 1.6, 3.4, 3.6 |
+| UIF-09 Navegación end-to-end; router por `session_state` | 1.3, 1.4, 1.5, 1.7 |
+| UIF-10 Solo muestra y envía; sin gRPC ni imports de engine/orquestador | 2.5, 4.4 |
+| UIF-11 Calidad: ≥3 pruebas AAA, cero warnings, ruff/black | 1.3, 2.1, 2.3, 2.6, 2.7, 4.1, 4.2 |
+| UIF-12 `streamlit` vía uv en `pyproject.toml` + `uv.lock`, sin pip | 1.1 |
+| D1 Router por `session_state` (gate de consentimiento) | 1.3, 1.4, 1.7 |
+| D2 Pantallas como funciones finas `render(ctx)` + lógica pura separada | 1.6, 3.1–3.4 |
+| D3 `api.py` única boca + Protocol + fuentes fake/http + swap `SOSPECHAI_UI_SOURCE` | 2.4, 2.5, 2.8 |
+| D4 Polling `st.fragment` con frecuencias por estado + degradación §14.1 | 1.4, 3.5 |
+| D5 Contador de palabras `count_words`/`within_limit` | 2.1, 2.2, 2.9 |
+| D6 IA anónima, lista plana, sin claves de `result` en R3-1 | 3.6 |
+| D7 Tests `tests/test_ui_words.py`, `tests/test_ui_router.py`, `tests/test_ui_api.py` | 1.3, 1.5, 2.1, 2.3, 2.6, 2.7 |
+| D8 `uv add streamlit` en `pyproject.toml` + `uv.lock` (solo uv) | 1.1 |

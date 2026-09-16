@@ -1,0 +1,66 @@
+schema: spec-driven
+
+context: |
+  Proyecto: SospechAI, juego social con IA. Equipo de 4 estudiantes, sprint de 4 días.
+  Stack: Python 3.13 + uv; un único proyecto en la raíz (pyproject.toml).
+  Arquitectura: src/orchestrator y src/impostor_engine se comunican solo por gRPC
+  (proto/impostor.proto congelado); la UI habla únicamente con el orquestador;
+  el engine no conoce rondas, votos, jugadores, puntajes ni partidas.
+  Pruebas: pytest en la raíz (tests/), 8 archivos, 173 tests, warnings tratados como error.
+  Estilo: PEP 8 con ruff y black; docstrings y type hints obligatorios.
+
+strict_tdd: true
+
+testing:
+  runner:
+    command: uv run pytest
+    framework: pytest
+  coverage:
+    available: true
+    command: uv run pytest --cov
+  linter:
+    available: true
+    command: uv run ruff check
+  formatter:
+    available: true
+    command: uv run black --check
+  type_checker:
+    available: false
+    command: null
+  e2e:
+    available: false
+    command: null
+
+projects:
+  - path: .
+    stack: python-3.13-uv
+    test_command: uv run pytest
+    coverage_command: uv run pytest --cov
+    linter_command: uv run ruff check
+    formatter_command: uv run black --check
+    type_checker_command: null
+    e2e_command: null
+
+rules:
+  proposal:
+    - Incluir plan de rollback para cambios riesgosos
+  specs:
+    - Escribir escenarios con Given/When/Then
+    - Usar palabras clave RFC 2119 (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Incluir diagramas de secuencia para flujos complejos
+    - Documentar decisiones de arquitectura con su justificación
+  tasks:
+    - Agrupar por fase con numeración jerárquica
+    - Mantener tareas completables en una sesión
+  apply:
+    guidelines:
+      - Seguir los patrones de código existentes y las reglas duras de AGENTS.md
+    tdd: true
+    test_command: uv run pytest
+  verify:
+    test_command: uv run pytest
+    build_command: uv run ruff check
+    coverage_threshold: 0
+  archive:
+    - Avisar antes de archivar deltas destructivos

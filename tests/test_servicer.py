@@ -7,11 +7,15 @@ import pytest
 from proto import impostor_pb2 as pb
 from src.impostor_engine.guards import count_words
 from src.impostor_engine.inference_client import InferenceError
-from src.impostor_engine.servicer import ImpostorEngineServicer
+from src.impostor_engine.servicer import (
+    CHARACTER_BREAK_CORRECTIVE,
+    MIN_BUDGET,
+    ImpostorEngineServicer,
+)
 
 
 class FakeStreamClient:
-    """Cliente compatible con el Protocol: produce deltas o lanza InferenceError."""
+    """Cliente compatible con el Protocol: deltas, secuencias o InferenceError."""
 
     def __init__(
         self,
@@ -19,19 +23,28 @@ class FakeStreamClient:
         *,
         error: InferenceError | None = None,
         token: bool = True,
+        per_call: list[list[str]] | None = None,
     ) -> None:
         """Definir la respuesta del stream y el estado de configuración."""
         self._deltas = list(deltas)
         self._error = error
+        self._per_call = list(per_call) if per_call is not None else None
+        self._call_index = 0
         self.calls: list[dict] = []
         self.last_usage = {"completion_tokens": 3}
         self.token = token
 
     def stream_chat(self, messages: list[dict], **kwargs) -> Iterator[str]:
         """Registrar parámetros y ceder deltas o lanzar el error configurado."""
-        self.calls.append({"messages": messages, **kwargs})
+        self.calls.append({"messages": list(messages), **kwargs})
         if self._error is not None:
             raise self._error
+        if self._per_call is not None:
+            if self._call_index < len(self._per_call):
+                deltas = self._per_call[self._call_index]
+                self._call_index += 1
+                yield from deltas
+            return
         yield from self._deltas
 
 
@@ -337,3 +350,109 @@ def test_zero_budget_aborts_deadline_exceeded() -> None:
         list(servicer.GenerateUtterance(request(), context))
     assert context.aborted[0][0].name == "DEADLINE_EXCEEDED"
     assert client.calls == []
+
+
+def test_character_break_flag_off_keeps_incremental_chunks() -> None:
+    """Con la regeneración apagada el flujo incremental clásico se conserva."""
+    client = FakeStreamClient(["ho", "la ", "mundo"])
+    servicer = ImpostorEngineServicer(client, regenerate_on_character_break=False)
+    chunks = list(servicer.GenerateUtterance(request(), FakeContext()))
+    assert [c.token_index for c in chunks if not c.is_final] == [0, 1, 2]
+    assert streamed_text(chunks) == "hola mundo"
+    assert len([c for c in chunks if c.is_final]) == 1
+
+
+def test_character_break_clean_first_attempt_no_regeneration() -> None:
+    """Candidato limpio al primer intento: un solo delta, sin regeneraciones."""
+    client = FakeStreamClient([], per_call=[["hola amigos"]])
+    servicer = ImpostorEngineServicer(client, regenerate_on_character_break=True)
+    context = FakeContext()
+    chunks = list(servicer.GenerateUtterance(request(), context))
+    assert len(client.calls) == 1
+    non_final = [c for c in chunks if not c.is_final]
+    assert len(non_final) == 1
+    assert non_final[0].token_index == 0
+    assert streamed_text(chunks) == "hola amigos"
+    meta = dict(context.trailing_metadata)
+    assert meta["x-regenerations"] == "0"
+    assert meta["x-character-break"] == "0"
+    assert meta["x-status"] == "ok"
+
+
+def test_character_break_regenerates_until_clean() -> None:
+    """Primer intento roto y segundo limpio: un delta final y segunda llamada."""
+    client = FakeStreamClient(
+        [], per_call=[["soy una ia"], ["jajaja si, yo creo que Juan es la IA"]]
+    )
+    servicer = ImpostorEngineServicer(client, regenerate_on_character_break=True)
+    context = FakeContext()
+    chunks = list(servicer.GenerateUtterance(request(), context))
+    assert len(client.calls) == 2
+    assert streamed_text(chunks) == "jajaja si, yo creo que Juan es la IA"
+    non_final = [c for c in chunks if not c.is_final]
+    assert len(non_final) == 1
+    assert non_final[0].token_index == 0
+    assert chunks[-1].is_final and chunks[-1].text_delta == ""
+    meta = dict(context.trailing_metadata)
+    assert meta["x-status"] == "ok"
+    assert meta["x-regenerations"] == "1"
+    assert meta["x-character-break"] == "0"
+    corrective = {"role": "system", "content": CHARACTER_BREAK_CORRECTIVE}
+    assert client.calls[1]["messages"][-1] == corrective
+    assert corrective not in client.calls[0]["messages"]
+
+
+def test_character_break_fail_open_after_max_attempts() -> None:
+    """Siempre roto: el tope de intentos se respeta y se entrega el último (fail-open)."""
+    client = FakeStreamClient(
+        [], per_call=[["soy una ia"], ["soy un modelo de lenguaje"]]
+    )
+    servicer = ImpostorEngineServicer(
+        client, regenerate_on_character_break=True, max_attempts=2
+    )
+    context = FakeContext()
+    chunks = list(servicer.GenerateUtterance(request(), context))
+    assert len(client.calls) == 2
+    assert streamed_text(chunks) == "soy un modelo de lenguaje"
+    non_final = [c for c in chunks if not c.is_final]
+    assert len(non_final) == 1
+    assert chunks[-1].is_final and chunks[-1].text_delta == ""
+    meta = dict(context.trailing_metadata)
+    assert meta["x-status"] == "ok"
+    assert meta["x-character-break"] == "1"
+    assert meta["x-regenerations"] == "1"
+
+
+def test_character_break_error_aborts_without_regeneration() -> None:
+    """Un error de inferencia nunca regenera: aborta como en el flujo clásico."""
+    client = FakeStreamClient([], error=InferenceError("credits", "agotado"))
+    servicer = ImpostorEngineServicer(client, regenerate_on_character_break=True)
+    context = FakeContext()
+    with pytest.raises(RuntimeError):
+        list(servicer.GenerateUtterance(request(), context))
+    assert len(client.calls) == 1
+    assert context.aborted[0][0].name == "RESOURCE_EXHAUSTED"
+    assert dict(context.trailing_metadata)["x-status"] == "credits"
+
+
+def test_character_break_validates_max_attempts() -> None:
+    """max_attempts no entero o menor que 1 se rechaza en el constructor."""
+    client = FakeStreamClient(["hola"])
+    for bad in (0, -1, 2.5, True):
+        with pytest.raises(ValueError):
+            ImpostorEngineServicer(
+                client, regenerate_on_character_break=True, max_attempts=bad
+            )
+
+
+def test_character_break_budget_divided_per_attempt() -> None:
+    """Cada intento recibe como máximo el presupuesto restante dividido."""
+    client = FakeStreamClient([], per_call=[["soy una ia"], ["hola"]])
+    servicer = ImpostorEngineServicer(client, regenerate_on_character_break=True)
+    context = FakeContext(remaining=8.0)
+    list(servicer.GenerateUtterance(request(), context))
+    assert len(client.calls) == 2
+    first, second = client.calls[0], client.calls[1]
+    assert first["timeout"] <= 8.0 / 2 + 1e-6
+    assert first["timeout"] >= MIN_BUDGET
+    assert 0 < second["timeout"] <= 8.0

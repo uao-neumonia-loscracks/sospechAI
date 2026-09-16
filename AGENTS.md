@@ -6,9 +6,9 @@ Estas reglas se aplican a todo cambio. Si un cambio las viola, se bloquea.
 
 - `proto/impostor.proto` es la fuente unica de verdad. Esta congelado.
   Ningun cambio puede modificarlo sin un ADR aprobado.
-- `src/orchestrator/` NUNCA importa nada de `src/engine/`. La unica
+- `src/orchestrator/` NUNCA importa nada de `src/impostor_engine/`. La unica
   comunicacion permitida es por gRPC a traves del contrato.
-- `src/engine/` NO conoce rondas, votos, jugadores, puntajes ni partidas.
+- `src/impostor_engine/` NO conoce rondas, votos, jugadores, puntajes ni partidas.
   Si aparece cualquiera de esas palabras en el engine, es un error de diseno.
 - `src/ui/` NUNCA habla gRPC directo con el engine. Solo con el orquestador.
 - Ningun modulo accede a atributos privados (_x) de otro modulo.

@@ -1,0 +1,64 @@
+# SospechAI · docker compose
+#
+# Estado (miércoles 16 sep): solo impostor-engine existe y tiene entrypoint
+# de servidor. Los servicios impostor-orchestrator y impostor-ui quedan
+# marcados como pendientes hasta que R2 entregue el servidor HTTP del
+# contrato UI-orquestador (A9) y R3 entregue la carpeta src/ui.
+# La demo del 19 se apoya en el PLAN B (tres terminales) mientras tanto.
+#
+# Uso:
+#   docker compose up --build -d
+#   docker compose ps
+#   docker compose logs -f impostor-engine
+
+services:
+  impostor-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: impostor-engine
+    environment:
+      HF_TOKEN: ${HF_TOKEN:?Definí HF_TOKEN en .env (ver .env.example)}
+    networks:
+      - sospechai-net
+    restart: unless-stopped
+    # SIN ports: el gRPC (50051) queda solo en la red interna, nunca sale
+    # al host. La Inference API sale por la red normal del daemon.
+
+  # --- PENDIENTE R2: requiere el servidor HTTP del contrato UI-orquestador.
+  # impostor-orchestrator:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.orchestrator
+  #   container_name: impostor-orchestrator
+  #   depends_on:
+  #     - impostor-engine
+  #   environment:
+  #     ENGINE_ADDR: impostor-engine:50051
+  #   volumes:
+  #     - sqlite-data:/app/data
+  #   networks:
+  #     - sospechai-net
+  #   restart: unless-stopped
+
+  # --- PENDIENTE R3: no existe src/ui todavía.
+  # impostor-ui:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.ui
+  #   container_name: impostor-ui
+  #   depends_on:
+  #     - impostor-orchestrator
+  #   ports:
+  #     - "8080:8080"   # ÚNICO puerto que se expone al host.
+  #   networks:
+  #     - sospechai-net
+  #   restart: unless-stopped
+
+networks:
+  sospechai-net:
+    driver: bridge
+
+volumes:
+  sqlite-data:
+    # Persiste la base local del orquestador entre ciclos de contenedores.

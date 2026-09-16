@@ -7,6 +7,7 @@ dependencies = [
     "grpcio==1.83.1",
     "protobuf==7.36.1",
     "python-dotenv>=1.2.3",
+    "streamlit>=1.64.0",
 ]
 
 [dependency-groups]

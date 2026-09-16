@@ -1,0 +1,22 @@
+PERSISTENCIA SOSPECHAI - SDD INIT
+=================================
+Fecha: 2026-09-16
+Modo: openspec (archivos en el repositorio, compartibles por git con el equipo).
+Engram: presente (store C:\Users\Juan Manuel Ospina\.engram\engram.db, proyecto
+  "sospechai"); se guardaron los registros requeridos por el skill
+  (sdd-init/sospechai, sdd/sospechai/testing-capabilities, skill-registry).
+
+Artefactos creados por el init:
+- openspec/config.yaml                 Configuracion SDD (contexto, strict_tdd, testing, projects, rules).
+- openspec/specs/                      Specs principales (directorio; placeholder .gitkeep).
+- openspec/changes/                    Cambios activos (directorio).
+- openspec/changes/archive/            Cambios archivados (directorio; placeholder .gitkeep).
+- .atl/skill-registry.md               Indice de skills (47 indexadas de 58 detectadas).
+
+Capacidades de testing (de referencia en config.yaml, testing: y projects:):
+- runner: pytest via `uv run pytest`  |  coverage: `uv run pytest --cov`
+- linter: `uv run ruff check`  |  formatter: `uv run black --check`
+- type checker: ninguno  |  E2E: ninguno  |  strict_tdd: true
+- Verificacion: `uv run pytest --collect-only -q` => 173 tests collected (8 archivos).
+
+Proxima fase sugerida: sdd-explore | sdd-new

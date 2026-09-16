@@ -227,3 +227,6 @@ mlruns/
 mlartifacts/
 mlflow.db
 data/practice/
+
+# Caché local del registro de skills (opencode)
+.atl/

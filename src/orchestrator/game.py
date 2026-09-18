@@ -34,6 +34,13 @@ class GameState(StrEnum):
 TIMED_STATES = {GameState.ROUND, GameState.DISCUSSION, GameState.VOTING}
 QUORUM_MIN_HUMANS = 2
 
+# Eventos de ciclo de vida que el dominio produce exactamente una vez por
+# transición; el servidor los persiste en el flujo game_events.
+GAME_EVENT_TYPES = ("game.started", "round.started", "round.completed", "game.closed")
+
+# Sumidero opcional: recibe (tipo de evento, carga) en cada transición.
+EventSink = Callable[[str, dict], None]
+
 
 class RuleViolation(ValueError):
     """Una acción del jugador no cumple las reglas o la etapa actual."""
@@ -66,6 +73,7 @@ class Game:
         max_words: int = 15,
         round_timeout: float | None = 20.0,
         clock: Callable[[], float] = time.monotonic,
+        event_sink: EventSink | None = None,
     ) -> None:
         """Crear una sala vacía con reglas explícitas y modificables."""
         if rounds < 1 or max_words < 1:
@@ -86,6 +94,8 @@ class Game:
         self._clock = clock
         self._deadline: float | None = None
         self._interruption_reason: str | None = None
+        self._close_reason: str | None = None
+        self.event_sink = event_sink
 
     def remaining_time(self) -> float | None:
         """Consultar el presupuesto de la fase temporal actual, si tiene ventana."""
@@ -100,6 +110,11 @@ class Game:
             if self.round_timeout is not None
             else None
         )
+
+    def _emit(self, event_type: str, payload: dict) -> None:
+        """Entregar un evento de ciclo de vida al sumidero conectado, si lo hay."""
+        if self.event_sink is not None:
+            self.event_sink(event_type, payload)
 
     def check_expiration(self) -> None:
         """Aplicar el vencimiento de la fase actual; el servicio también lo invoca."""
@@ -120,7 +135,7 @@ class Game:
             if self._present_humans() < QUORUM_MIN_HUMANS:
                 self.interrupt("quorum_lost")
             else:
-                self._complete_reveal()
+                self._complete_reveal("voting_timeout")
 
     def _submitted_humans(self) -> int:
         """Contar humanos distintos que ya respondieron en la ronda actual."""
@@ -158,6 +173,7 @@ class Game:
             )
         self._interruption_reason = reason
         self.state = GameState.REVEAL
+        self._emit_close()
 
     def validate_ai_turn(self, alias: str, expected_round: int) -> None:
         """Rechazar llamadas para humanos o turnos ya enviados antes de invocar la IA."""
@@ -205,6 +221,8 @@ class Game:
         self.round_number = 1
         self.state = GameState.ROUND
         self._set_deadline()
+        self._emit("game.started", {"rounds": self.rounds, "max_words": self.max_words})
+        self._emit("round.started", {"round_number": 1})
 
     def submit_message(
         self, alias: str, text: str, *, expected_round: int | None = None
@@ -232,11 +250,15 @@ class Game:
         self._messages.append(Message(self.round_number, alias, normalized))
         if len(current) + 1 == len(self._players):
             if self.round_number < self.rounds:
+                finished = self.round_number
                 self.round_number += 1
                 self._set_deadline()
+                self._emit("round.completed", {"round_number": finished})
+                self._emit("round.started", {"round_number": self.round_number})
             else:
                 self.state = GameState.DISCUSSION
                 self._set_deadline()
+                self._emit("round.completed", {"round_number": self.round_number})
         return normalized
 
     def open_voting(self) -> None:
@@ -268,11 +290,29 @@ class Game:
             self._explicit_abstentions.add(voter_alias)
         human_count = sum(not player.is_ai for player in self._players.values())
         if len(self._votes) == human_count:
-            self._complete_reveal()
+            self._complete_reveal("completed")
 
-    def _complete_reveal(self) -> None:
-        """Revelar cuando todos los humanos ya votaron o se abstuvieron."""
+    def _complete_reveal(self, reason: str) -> None:
+        """Revelar al cerrar la votación y notificar el motivo del cierre."""
+        self._close_reason = reason
         self.state = GameState.REVEAL
+        self._emit_close()
+
+    def _emit_close(self) -> None:
+        """Emitir el cierre de partida exactamente una vez al entrar en revelación."""
+        assert (self._interruption_reason is None) != (self._close_reason is None)
+        self._emit("game.closed", self._close_payload())
+
+    def _close_payload(self) -> dict:
+        """Construir la carga del cierre con motivo, validez y tasa de detección."""
+        _, _, tasa_deteccion = self._detection_stats()
+        valid_game = self._interruption_reason is None
+        return {
+            "reason": self._interruption_reason or self._close_reason,
+            "valid_game": valid_game,
+            "tasa_deteccion": tasa_deteccion if valid_game else None,
+            "rounds": self.rounds,
+        }
 
     def public_state(self) -> dict:
         """Ofrecer una vista sin identidades de IA ni votos individuales anticipados."""

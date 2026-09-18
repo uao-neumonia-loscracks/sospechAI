@@ -19,7 +19,7 @@ import pytest
 
 from proto import impostor_pb2 as pb
 from src.orchestrator.engine_client import EngineClient
-from src.orchestrator.game import ABSTAIN_SENTINEL, Game
+from src.orchestrator.game import ABSTAIN_SENTINEL, EventSink, Game
 from src.orchestrator.server import GameServer, ServerConfig, parse_route
 from src.orchestrator.session import SessionStore
 from src.orchestrator.tracking import EngineUsage
@@ -162,10 +162,14 @@ def serve(
     client: Any = None,
     clock: Any = time.monotonic,
     config: ServerConfig | None = None,
+    event_sink_factory: Any = None,
 ) -> Iterator[tuple[Api, SessionStore]]:
     """Abrir un GameServer real en loopback con puerto efímero y cerrarlo."""
     store = store or SessionStore()
     factory = game_factory or (lambda: Game(rounds=1, round_timeout=None, clock=clock))
+    sink_options = {}
+    if event_sink_factory is not None:
+        sink_options["event_sink_factory"] = event_sink_factory
     server = GameServer(
         ("127.0.0.1", 0),
         store,
@@ -173,6 +177,7 @@ def serve(
         config=config or ServerConfig(model_id=MODEL_ID),
         game_factory=factory,
         clock=clock,
+        **sink_options,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -986,6 +991,85 @@ def test_remaining_seconds_tracks_current_timed_phase() -> None:
         revelacion = state(api, code, host)
         assert revelacion["state"] == "REVELACION"
         assert revelacion["remaining_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# Wiring del sumidero de eventos (R2-4)
+# ---------------------------------------------------------------------------
+
+
+class EventRecorder:
+    """Sumidero de eventos por sala para verificar el wiring del servidor."""
+
+    def __init__(self) -> None:
+        """Comenzar sin eventos registrados."""
+        self.events: list[tuple[str, str, dict]] = []
+
+    def sink_for(self, code: str) -> EventSink:
+        """Construir el sumidero ligado al código de sala emitido."""
+
+        def sink(event_type: str, payload: dict) -> None:
+            self.events.append((code, event_type, payload))
+
+        return sink
+
+
+def test_new_games_receive_the_event_sink() -> None:
+    """Toda sala creada recibe el sumidero y emite el flujo ligado a su código."""
+    recorder = EventRecorder()
+    with serve(event_sink_factory=recorder.sink_for) as (api, store):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=host,
+        )
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=token2,
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+    assert [event[1] for event in recorder.events] == [
+        "game.started",
+        "round.started",
+        "round.completed",
+        "game.closed",
+    ]
+    assert [event[0] for event in recorder.events] == [code] * 4
+    assert recorder.events[-1][2]["reason"] == "completed"
+
+
+def test_server_without_sink_behaves_unchanged() -> None:
+    """Sin fábrica de sumideros el servidor no gestiona eventos y sigue igual."""
+    with serve() as (api, store):
+        code, host, _ = open_room(api)
+        assert store.room(code).game.event_sink is None
+        token2, _ = join_room(api, code)
+        assert store.room(code).game.event_sink is None
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=host,
+        )
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=token2,
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+        assert snapshot["result"]["valid_game"] is True
 
 
 # ---------------------------------------------------------------------------

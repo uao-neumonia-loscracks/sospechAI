@@ -1,0 +1,26 @@
+# Orchestrator de SospechAI: servidor HTTP del juego sobre el engine gRPC.
+# Mismo patrón que el Dockerfile del engine: Python 3.13 + uv, código copiado
+# después de las dependencias congeladas.
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+
+WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1
+
+# Primero las dependencias congeladas (mejor caché de capas).
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Después el código y el contrato.
+COPY proto ./proto
+COPY src ./src
+
+# Directorio de la base de eventos de práctica (volumen sqlite-data).
+RUN mkdir -p /app/data
+
+EXPOSE 8080
+
+# Entrypoint real del orquestador (módulo "server", contrato UI-orquestador).
+CMD ["uv", "run", "--no-sync", "python", "-m", "src.orchestrator.server"]

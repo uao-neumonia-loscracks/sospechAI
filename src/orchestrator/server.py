@@ -3,15 +3,24 @@
 Envuelve el dominio sin candados de ``game.py`` con un servidor estándar:
 rutas del contrato, identidad ligada al token (X-Session-Token), un candado
 por sala alrededor de toda llamada al dominio y mapeo estable de errores.
-El timer y el turno de la IA llegan en la fase 3; esta fase solo transporta.
+La fase 3 añade el timer del servidor (expiración con cero consultas de
+cliente) y el turno de la IA disparado al cerrar los humanos cada ronda.
 """
 
+import argparse
 import json
+import os
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from src.orchestrator.engine_client import EngineClient
+import grpc
+
+from proto import impostor_pb2 as pb
+from proto import impostor_pb2_grpc as rpc
+from src.orchestrator.engine_client import EngineClient, apply_ai_turn
 from src.orchestrator.game import Game, RuleViolation, normalize_text
 from src.orchestrator.session import IssuedIdentity, Room, SessionStore
 
@@ -54,6 +63,23 @@ TRANSPORT_MESSAGES = {
     "method_not_allowed": "Método no permitido para esta ruta.",
     "internal": "Error interno del servidor.",
 }
+
+DEFAULT_PROMPTS = (
+    "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
+    "¿Qué comida escogerías después de una clase larga?",
+)
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    """Configuración del motor para las peticiones del impostor (R1 hf-router)."""
+
+    temperature: float = 0.9
+    top_p: float = 0.9
+    system_prompt_version: str = "v2"
+    model_id: str = field(
+        default_factory=lambda: os.environ.get("SOSPECHAI_MODEL_ID", "")
+    )
 
 
 def parse_route(path: str) -> tuple[str, str | None] | None:
@@ -133,7 +159,7 @@ class _HttpError(Exception):
 
 
 class GameServer(ThreadingHTTPServer):
-    """Servidor multijugador con salas por token y candado por sala."""
+    """Servidor multijugador con salas por token, candado por sala y timer."""
 
     daemon_threads = True
 
@@ -143,16 +169,25 @@ class GameServer(ThreadingHTTPServer):
         store: SessionStore,
         client: EngineClient,
         *,
-        game_factory: Callable[[], Game] | None = None,
+        prompts: Sequence[str] = DEFAULT_PROMPTS,
+        config: ServerConfig = ServerConfig(),
         clock: Callable[[], float] = time.monotonic,
+        game_factory: Callable[[], Game] | None = None,
+        timer_tick: float = 0.5,
     ) -> None:
-        """Guardar el registro de sesiones, el cliente y la fábrica de partidas."""
+        """Guardar sesiones, motor, prompts/ajustes, fábrica de partidas y timer."""
         super().__init__(addr, ApiHandler)
         self.store = store
         self.client = client
+        self.prompts = tuple(prompts)
+        self.config = config
         self._clock = clock
         self._game_factory = game_factory or (lambda: Game(clock=clock))
+        self._timer_tick = timer_tick
         self._token_rooms: dict[str, Room] = {}
+        self._known_rooms: dict[str, Room] = {}
+        self._timer_stop: threading.Event | None = None
+        self._timer_thread: threading.Thread | None = None
 
     def new_game(self) -> Game:
         """Construir la partida con la fábrica inyectada (determinista en pruebas)."""
@@ -163,8 +198,35 @@ class GameServer(ThreadingHTTPServer):
         return self._token_rooms.get(token)
 
     def record_token(self, identity: IssuedIdentity) -> None:
-        """Asociar un token emitido a su sala para distinguir 401 de 403."""
-        self._token_rooms[identity.session_token] = self.store.room(identity.room_code)
+        """Asociar un token emitido a su sala y registrar la sala para el timer."""
+        room = self.store.room(identity.room_code)
+        self._token_rooms[identity.session_token] = room
+        self._known_rooms[room.code] = room
+
+    def start_timer(self) -> None:
+        """Arrancar el hilo que expira las rondas vencidas del servidor."""
+        if self._timer_thread is not None and self._timer_thread.is_alive():
+            return
+        self._timer_stop = threading.Event()
+        self._timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
+        self._timer_thread.start()
+
+    def stop_timer(self) -> None:
+        """Detener el hilo de expiración y esperar a que termine."""
+        if self._timer_stop is not None:
+            self._timer_stop.set()
+        if self._timer_thread is not None:
+            self._timer_thread.join(timeout=5)
+            self._timer_thread = None
+
+    def _timer_loop(self) -> None:
+        """Revisar cada sala conocida y expirar las rondas vencidas bajo su candado."""
+        stop = self._timer_stop
+        assert stop is not None
+        while not stop.wait(self._timer_tick):
+            for room in list(self._known_rooms.values()):
+                with room.lock:
+                    room.game.check_expiration()
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -243,7 +305,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_204()
 
     def _handle_messages(self, code: str) -> None:
-        """Registrar el mensaje de la ronda ligado al token (sin turno de IA aquí)."""
+        """Registrar el mensaje y disparar el turno de la IA al cerrar los humanos."""
         room, alias = self._resolve_player(code)
         text = self._read_text_body()
         with room.lock:
@@ -255,6 +317,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 raise _HttpError(
                     classify_submit(room.game, alias, text), str(error)
                 ) from error
+            if self._humans_complete(room):
+                self._run_ai_turn(room)
         self._send_204()
 
     def _handle_open_voting(self, code: str) -> None:
@@ -300,6 +364,50 @@ class ApiHandler(BaseHTTPRequestHandler):
             "session_token": identity.session_token,
             "alias": identity.alias,
         }
+
+    def _humans_complete(self, room: Room) -> bool:
+        """Decidir si todos los humanos ya respondieron a la ronda vigente."""
+        view = room.game.public_state()
+        if view["state"] != "RONDA":
+            return False
+        submitters = {
+            message["alias"]
+            for message in view["messages"]
+            if message["round_number"] == view["round_number"]
+        }
+        return all(alias in submitters for alias in room.players.values())
+
+    def _run_ai_turn(self, room: Room) -> None:
+        """Publicar una única respuesta del impostor con el motor inyectado."""
+        game = room.game
+        request = self._utterance_request(game, room.code)
+        ai_alias = next(
+            alias
+            for alias in game.public_state()["players"]
+            if alias not in room.players.values()
+        )
+        try:
+            apply_ai_turn(game, ai_alias, self.server.client, request, timeout=8.0)
+        except Exception:
+            raise _HttpError("internal", TRANSPORT_MESSAGES["internal"]) from None
+
+    def _utterance_request(self, game: Game, room_code: str) -> pb.UtteranceRequest:
+        """Construir la petición del impostor con prompts y configuración inyectados."""
+        prompt = self.server.prompts[game.round_number - 1]
+        config = self.server.config
+        return pb.UtteranceRequest(
+            room_id=room_code,
+            persona_id="p1",
+            prompt=prompt,
+            config=pb.GenerationConfig(
+                temperature=config.temperature,
+                top_p=config.top_p,
+                max_words=game.max_words,
+                system_prompt_version=config.system_prompt_version,
+                engine_backend="hf-router",
+                model_id=config.model_id,
+            ),
+        )
 
     def _resolve_room_and_token(self, code: str) -> tuple[Room, str]:
         """Validar sala y token con la precedencia 404 → 401 → 403."""
@@ -379,3 +487,68 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _send_error(self, error: _HttpError) -> None:
         """Serializar un error del contrato."""
         self._send_json(error.status, {"code": error.code, "message": error.message})
+
+
+def _parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
+    """Definir las opciones de consola del servidor real."""
+    parser = argparse.ArgumentParser(prog="sospechai-server", description=__doc__)
+    parser.add_argument("--host", default="0.0.0.0", help="Interfaz de escucha.")
+    parser.add_argument("--port", type=int, default=8080, help="Puerto de escucha.")
+    parser.add_argument(
+        "--model-id",
+        default=os.environ.get("SOSPECHAI_MODEL_ID", ""),
+        help="Modelo del engine hf-router.",
+    )
+    parser.add_argument("--rounds", type=int, default=2, help="Rondas por partida.")
+    parser.add_argument(
+        "--max-words", type=int, default=15, help="Máximo de palabras por respuesta."
+    )
+    parser.add_argument(
+        "--round-timeout",
+        type=float,
+        default=20.0,
+        help="Ventana de cada ronda en segundos.",
+    )
+    return parser.parse_args(arguments)
+
+
+def _run_server(options: argparse.Namespace) -> None:
+    """Wiring real: gRPC al engine R1, timer y servidor en primer plano."""
+    address = os.environ.get("SOSPECHAI_ENGINE_ADDR", "impostor-engine:50051")
+    channel = grpc.insecure_channel(address, options=[("grpc.enable_retries", 0)])
+    config = ServerConfig(model_id=options.model_id)
+
+    def factory() -> Game:
+        """Construir partidas con la configuración pedida en consola."""
+        return Game(
+            rounds=options.rounds,
+            max_words=options.max_words,
+            round_timeout=options.round_timeout,
+        )
+
+    server = GameServer(
+        (options.host, options.port),
+        SessionStore(),
+        EngineClient(rpc.ImpostorEngineStub(channel)),
+        config=config,
+        game_factory=factory,
+    )
+    server.start_timer()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop_timer()
+        server.server_close()
+        channel.close()
+
+
+def main() -> int:
+    """Ejecutar el servidor real hasta que se interrumpa la consola."""
+    _run_server(_parse_args())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

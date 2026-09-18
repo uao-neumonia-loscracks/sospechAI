@@ -265,7 +265,7 @@ def test_log_game_run_records_expected_metrics(tmp_path, monkeypatch) -> None:
     assert metrics["rondas_sobrevividas"] == 3.0
     assert metrics["tasa_falsa_acusacion"] == pytest.approx(1 / 3)
     assert metrics["tasa_ruptura_personaje"] == pytest.approx(0.2)
-    assert metrics["latencia_p95"] == pytest.approx(80.8)
+    assert metrics["latencia_p95"] == pytest.approx(100.0)
     assert metrics["tokens_totales"] == 1_500.0
     assert metrics["costo_estimado"] == pytest.approx(18.5)
 

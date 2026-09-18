@@ -4,6 +4,7 @@ Este módulo pertenece a src/common: recibe números y devuelve números.
 No conoce votos, partidas, HTTP ni gRPC (regla de AGENTS.md).
 """
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -20,21 +21,18 @@ def rate(hits: int, total: int) -> float | None:
 
 
 def latency_p95(latencies_ms: Sequence[float]) -> float | None:
-    """Calcular el percentil 95 de latencias por interpolación lineal.
+    """Calcular el percentil 95 de latencias por rango más próximo.
 
-    Método elegido: ordenar la muestra y tomar la posición (n - 1) * 0.95;
-    si la posición cae entre dos valores, interpolar linealmente entre ambos
-    (el mismo método que usa numpy por defecto). Devuelve None si la
-    secuencia está vacía.
+    Criterio del plan: ordenar la muestra y tomar el índice ceil(0.95 * n) - 1
+    en base 0 (con 30 muestras, el índice 28). Documentado en
+    docs/verificaciones/2026-09-09-benchmark-r1.md y REVISION_CAMBIO_API.md.
+    Devuelve None si la secuencia está vacía.
     """
     if not latencies_ms:
         return None
     ordered = sorted(latencies_ms)
-    position = (len(ordered) - 1) * 0.95
-    lower = int(position)
-    upper = lower + 1 if lower + 1 < len(ordered) else lower
-    weight = position - lower
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
+    index = math.ceil(0.95 * len(ordered)) - 1
+    return ordered[index]
 
 
 @dataclass(frozen=True)

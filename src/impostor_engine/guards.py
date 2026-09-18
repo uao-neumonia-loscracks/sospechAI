@@ -4,16 +4,9 @@ Opera exclusivamente sobre texto ya normalizado o lo normaliza internamente.
 No corta en medio de surrogates: opera sobre graphemas completos.
 """
 
-import unicodedata
-
-
-def normalize_text(text: str) -> str:
-    """Unificar espacios y representación Unicode, conservando tildes y estilo.
-
-    Replica exactamente la semántica de src.orchestrator.game.normalize_text:
-    NFC + split (colapsa todos los tipos de espacio) + join con un solo espacio.
-    """
-    return " ".join(unicodedata.normalize("NFC", text).split())
+# Reexportado para no romper a character_break ni a servicer, que importan el
+# nombre desde este módulo. La implementación vive en src/common/text.py.
+from src.common.text import normalize_text as normalize_text
 
 
 def count_words(text: str) -> int:

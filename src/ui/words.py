@@ -4,12 +4,9 @@ Sin imports de Streamlit: solo estimación local del conteo, con la autoridad
 del límite siempre en el orquestador (UIF-05).
 """
 
-import unicodedata
-
-
-def normalize_text(text: str) -> str:
-    """Unificar espacios y representación Unicode como el dominio (NFC)."""
-    return " ".join(unicodedata.normalize("NFC", text).split())
+# Reexportado para no romper a sources/fake, que importa el nombre desde este
+# módulo. La implementación vive en src/common/text.py.
+from src.common.text import normalize_text as normalize_text
 
 
 def count_words(text: str) -> int:

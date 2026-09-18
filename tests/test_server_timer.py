@@ -487,3 +487,31 @@ def test_ai_has_no_token_and_cannot_vote() -> None:
             token="Jugador 3",
         )
         assert (status, body["code"]) == (401, "session_expired")
+
+
+def test_timer_reveal_logs_game_once_without_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El vencimiento por timer registra la partida una vez, sin uso del engine."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "src.orchestrator.server.log_game_run",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    def factory() -> Game:
+        return Game(rounds=1, max_words=15, round_timeout=0.05)
+
+    with serve(timer=True, timer_tick=0.01, game_factory=factory) as (api, store, _):
+        code, host, _ = open_room(api)
+        join_room(api, code)
+        start_room(api, code, host)
+        assert wait_until(
+            lambda: store.room(code).game.state == GameState.REVEAL, timeout=2.0
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+    assert len(calls) == 1
+    assert calls[0]["usage"] is None
+    assert calls[0]["result"]["interruption_reason"] == "round_timeout"
+    assert calls[0]["params"].n_players == 3

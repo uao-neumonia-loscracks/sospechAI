@@ -9,6 +9,7 @@ cliente) y el turno de la IA disparado al cerrar los humanos cada ronda.
 
 import argparse
 import json
+import logging
 import os
 import threading
 import time
@@ -21,8 +22,11 @@ import grpc
 from proto import impostor_pb2 as pb
 from proto import impostor_pb2_grpc as rpc
 from src.orchestrator.engine_client import EngineClient, apply_ai_turn
-from src.orchestrator.game import Game, RuleViolation, normalize_text
+from src.orchestrator.game import Game, GameState, RuleViolation, normalize_text
 from src.orchestrator.session import IssuedIdentity, Room, SessionStore
+from src.orchestrator.tracking import EngineUsage, RunParams, log_game_run
+
+logger = logging.getLogger(__name__)
 
 ROUTES = {
     "create": "POST",
@@ -188,6 +192,8 @@ class GameServer(ThreadingHTTPServer):
         self._known_rooms: dict[str, Room] = {}
         self._timer_stop: threading.Event | None = None
         self._timer_thread: threading.Thread | None = None
+        self._usage_by_room: dict[str, list[tuple[str, str]]] = {}
+        self._tracked_rooms: set[str] = set()
 
     def new_game(self) -> Game:
         """Construir la partida con la fábrica inyectada (determinista en pruebas)."""
@@ -219,6 +225,47 @@ class GameServer(ThreadingHTTPServer):
             self._timer_thread.join(timeout=5)
             self._timer_thread = None
 
+    def record_usage(self, room: Room, pairs: Sequence[tuple[str, str]]) -> None:
+        """Acumular la metadata de una respuesta publicada para el cierre."""
+        self._usage_by_room.setdefault(room.code, []).extend(pairs)
+
+    def log_finished_game(self, room: Room) -> None:
+        """Registrar la partida terminal en MLflow, una única vez por sala.
+
+        Se invoca bajo room.lock en los puntos que ya producen REVELACION
+        (votos, turno de IA, timer o poll que expire la ronda); el guard de
+        _tracked_rooms hace el registro idempotente. Sin metadata acumulada
+        (partida interrumpida antes de cualquier respuesta exitosa) se
+        registra usage=None: no se inventan ceros.
+        """
+        if room.code in self._tracked_rooms or room.game.state != GameState.REVEAL:
+            return
+        self._tracked_rooms.add(room.code)
+        config = self.config
+        params = RunParams(
+            model_id=config.model_id,
+            engine_backend="hf-router",
+            provider="",  # el server no conoce el proveedor por separado (R1/R2)
+            temperature=config.temperature,
+            top_p=config.top_p,
+            system_prompt_version=config.system_prompt_version,
+            max_words=room.game.max_words,
+            n_players=len(room.players) + 1,
+            n_rondas=room.game.rounds,
+        )
+        pairs = self._usage_by_room.get(room.code, [])
+        try:
+            usage = EngineUsage.from_trailing_metadata(pairs) if pairs else None
+        except ValueError as error:
+            logger.error(
+                "Metadata de uso malformada en la sala %s: %s", room.code, error
+            )
+            usage = None
+        try:
+            log_game_run(params=params, result=room.game.result(), usage=usage)
+        except Exception:
+            logger.exception("No se pudo registrar la partida %s en MLflow", room.code)
+
     def _timer_loop(self) -> None:
         """Revisar cada sala conocida y expirar las rondas vencidas bajo su candado."""
         stop = self._timer_stop
@@ -227,6 +274,7 @@ class GameServer(ThreadingHTTPServer):
             for room in list(self._known_rooms.values()):
                 with room.lock:
                     room.game.check_expiration()
+                    self.log_finished_game(room)
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -319,6 +367,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 ) from error
             if self._humans_complete(room):
                 self._run_ai_turn(room)
+            self.server.log_finished_game(room)
         self._send_204()
 
     def _handle_open_voting(self, code: str) -> None:
@@ -346,6 +395,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 raise _HttpError(
                     classify_vote(room.game, alias, suspect), str(error)
                 ) from error
+            self.server.log_finished_game(room)
         self._send_204()
 
     def _handle_state(self, code: str) -> None:
@@ -353,6 +403,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         room, _ = self._resolve_player(code)
         with room.lock:
             body = json.dumps(room.game.public_state(), ensure_ascii=False).encode()
+            self.server.log_finished_game(room)
         self._send_bytes(200, body)
 
     # ------------------------------------------------------------------- ayuda
@@ -378,7 +429,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         return all(alias in submitters for alias in room.players.values())
 
     def _run_ai_turn(self, room: Room) -> None:
-        """Publicar una única respuesta del impostor con el motor inyectado."""
+        """Publicar una única respuesta del impostor y acumular su metadata."""
         game = room.game
         request = self._utterance_request(game, room.code)
         ai_alias = next(
@@ -387,9 +438,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             if alias not in room.players.values()
         )
         try:
-            apply_ai_turn(game, ai_alias, self.server.client, request, timeout=8.0)
+            generated = apply_ai_turn(
+                game, ai_alias, self.server.client, request, timeout=8.0
+            )
         except Exception:
             raise _HttpError("internal", TRANSPORT_MESSAGES["internal"]) from None
+        if generated is not None:
+            self.server.record_usage(room, generated.trailing_metadata)
 
     def _utterance_request(self, game: Game, room_code: str) -> pb.UtteranceRequest:
         """Construir la petición del impostor con prompts y configuración inyectados."""

@@ -39,12 +39,15 @@ class RemoteError(grpc.RpcError):
 
 
 class FakeCall:
-    """Stream controlado con cancelación verificable."""
+    """Stream controlado con cancelación verificable y metadata opcional."""
 
-    def __init__(self, chunks: list) -> None:
-        """Preparar fragmentos o errores para una llamada."""
+    def __init__(
+        self, chunks: list, metadata: list[tuple[str, str]] | None = None
+    ) -> None:
+        """Preparar fragmentos o errores y la metadata que simula el RPC."""
         self.chunks = iter(chunks)
         self.cancelled = False
+        self.metadata = metadata
 
     def __iter__(self) -> "FakeCall":
         """Permitir consumir el stream como una llamada de gRPC."""
@@ -57,6 +60,10 @@ class FakeCall:
             raise item
         return item
 
+    def trailing_metadata(self) -> tuple[tuple[str, str], ...]:
+        """Devolver la metadata simulada, o vacía si no se configuró."""
+        return tuple(self.metadata or ())
+
     def cancel(self) -> None:
         """Registrar la liberación de recursos de la llamada."""
         self.cancelled = True
@@ -65,9 +72,9 @@ class FakeCall:
 class Stub:
     """Doble determinista que mide intentos y presupuesto enviado."""
 
-    def __init__(self, chunks: list) -> None:
+    def __init__(self, chunks: list, *, call: FakeCall | None = None) -> None:
         """Definir la respuesta sin ninguna llamada HTTP."""
-        self.call = FakeCall(chunks)
+        self.call = call or FakeCall(chunks)
         self.calls = 0
         self.timeout: float | None = None
         self.request: pb.UtteranceRequest | None = None
@@ -121,9 +128,50 @@ def test_complete_stream_preserves_request_and_has_one_attempt() -> None:
         ]
     )
     req = request()
-    assert EngineClient(stub).generate(req, timeout=3) == "  café rico  "
+    generated = EngineClient(stub).generate(req, timeout=3)
+    assert generated.text == "  café rico  "
     assert stub.request == req
     assert stub.calls == 1 and stub.timeout == 3 and stub.call.cancelled
+
+
+def test_generate_captures_trailing_metadata_after_stream() -> None:
+    """La metadata de uso viaja con la respuesta y se lee antes de cancelar."""
+    metadata = [
+        ("x-usage-prompt-tokens", "120"),
+        ("x-latency-total-ms", "123.4"),
+        ("x-model-id", "test/model:provider"),
+    ]
+    call = FakeCall(chunks(), metadata=metadata)
+    stub = Stub([], call=call)
+    generated = EngineClient(stub).generate(request(), timeout=3)
+    assert generated.text == "Un café."
+    assert generated.trailing_metadata == tuple(metadata)
+    assert stub.call.cancelled
+
+
+def test_generate_tolerates_stub_without_trailing_metadata() -> None:
+    """Un doble sin trailing_metadata() no rompe el contrato: queda vacía."""
+
+    class PlainCall:
+        """Llamada mínima sin metadata, como los dobles anteriores a A13."""
+
+        def __init__(self, stream: list) -> None:
+            self.stream = iter(stream)
+            self.cancelled = False
+
+        def __iter__(self) -> "PlainCall":
+            return self
+
+        def __next__(self) -> pb.UtteranceChunk:
+            return next(self.stream)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    stub = Stub([], call=PlainCall(chunks()))
+    generated = EngineClient(stub).generate(request(), timeout=3)
+    assert generated.text == "Un café."
+    assert generated.trailing_metadata == ()
 
 
 @pytest.mark.parametrize(
@@ -348,7 +396,7 @@ def real_stub() -> Iterator[rpc.ImpostorEngineStub]:
 def test_generated_stubs_work_over_real_grpc(real_stub: rpc.ImpostorEngineStub) -> None:
     """Los stubs publicados permiten consultar salud y recibir un stream real."""
     assert real_stub.HealthCheck(pb.HealthRequest(), timeout=1).healthy
-    assert EngineClient(real_stub).generate(request(), timeout=1) == "Un café."
+    assert EngineClient(real_stub).generate(request(), timeout=1).text == "Un café."
 
 
 @pytest.mark.integration

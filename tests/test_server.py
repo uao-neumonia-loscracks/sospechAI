@@ -918,7 +918,8 @@ def test_abstain_sentinel_outside_voting_is_wrong_state() -> None:
         )
         assert (status, body["code"]) == (409, "wrong_state")
         assert (
-            body["message"] == "Esta acción requiere VOTACION; la partida está en RONDA."
+            body["message"]
+            == "Esta acción requiere VOTACION; la partida está en RONDA."
         )
 
 

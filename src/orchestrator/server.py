@@ -22,7 +22,13 @@ import grpc
 from proto import impostor_pb2 as pb
 from proto import impostor_pb2_grpc as rpc
 from src.orchestrator.engine_client import EngineClient, apply_ai_turn
-from src.orchestrator.game import Game, GameState, RuleViolation, normalize_text
+from src.orchestrator.game import (
+    ABSTAIN_SENTINEL,
+    Game,
+    GameState,
+    RuleViolation,
+    normalize_text,
+)
 from src.orchestrator.session import IssuedIdentity, Room, SessionStore
 from src.orchestrator.tracking import EngineUsage, RunParams, log_game_run
 
@@ -147,10 +153,17 @@ def classify_submit(game: Game, alias: str, text: str) -> str:
 
 
 def classify_vote(game: Game, voter_alias: str, suspect_alias: str) -> str:
-    """Clasificar un RuleViolation de cast_vote con el estado vigente."""
+    """Clasificar un RuleViolation de cast_vote con el estado vigente.
+
+    El sentinel de abstención no es un jugador, así que se considera primero:
+    fuera de VOTACION manda ``wrong_state``; ya dentro, un segundo intento de
+    abstención es ``duplicate_vote`` y nunca cae en ``not_a_player``.
+    """
     snapshot = game.public_state()
     if snapshot["state"] != "VOTACION":
         return "wrong_state"
+    if suspect_alias == ABSTAIN_SENTINEL:
+        return "duplicate_vote"
     if suspect_alias not in snapshot["players"]:
         return "not_a_player"
     if voter_alias == suspect_alias:
@@ -393,12 +406,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_204()
 
     def _handle_votes(self, code: str) -> None:
-        """Registrar el voto del humano ligado al token."""
+        """Registrar el voto del humano ligado al token (sentinel → abstención)."""
         room, alias = self._resolve_player(code)
         suspect = self._read_suspect_body()
         with room.lock:
             try:
-                room.game.cast_vote(alias, suspect)
+                room.game.cast_vote(
+                    alias, None if suspect == ABSTAIN_SENTINEL else suspect
+                )
             except RuleViolation as error:
                 raise _HttpError(
                     classify_vote(room.game, alias, suspect), str(error)

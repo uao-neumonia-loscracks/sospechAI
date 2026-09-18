@@ -104,10 +104,12 @@ Lo observado hasta hoy. **No hay evaluación cuantitativa todavía**: el set de
 - **Latencia:** TTFT p95 de 1,39 s y total p95 de 2,28 s con el endpoint
   caliente. El primer llamado paga un warm-up de unos 2,8 s. Cabe en el
   deadline de 8 s, pero no se midió bajo carga concurrente.
-- **Costo:** unos USD 0,0016 por llamada según Billing (143 solicitudes), cerca
-  de 100 veces lo que sugiere la tarifa publicada por token. La causa está
-  **sin confirmar** (R1-9, ADR-006 pendiente). Esto condiciona el tamaño del
-  barrido experimental.
+- **Costo:** despreciable y proporcional a los tokens. La lectura de Billing del
+  2026-09-18 da **USD 0,00 para 169 solicitudes** (todas a Featherless AI), un
+  techo de **< USD 0,000059 por llamada** que descarta la facturación plana por
+  solicitud y la facturación por tiempo de cómputo, y deja al modelo por token
+  como el único compatible con lo medido. El barrido experimental de 540
+  llamadas ronda los **USD 0,01**. Ver ADR-006.
 
 ## 7. Consideraciones éticas: engaño controlado
 
@@ -144,6 +146,6 @@ pueden contener estereotipos regionales; el piloto debe anotarlos.
 |---|---|---|
 | Evaluación contra el set de 100 pares y comparación con un segundo modelo | A4, A11 | R1 + R3 |
 | Tasa real de ruptura de personaje en partidas | MLflow, métrica `tasa_ruptura_personaje` (A13) | R1 |
-| Causa del costo por llamada | ADR-006 (pendiente), R1-9 | R1 |
+| Unidad real de facturación: tarifa por token frente a cuota gratuita | ADR-006, R1-9 | R1 |
 | Tarifa vigente de Featherless en el router | <https://huggingface.co/docs/inference-providers/pricing> | R1 |
 | Benchmarks públicos del modelo | No se citan aquí porque no se verificaron. Ver <https://qwenlm.github.io/blog/qwen2.5/> | R4 |

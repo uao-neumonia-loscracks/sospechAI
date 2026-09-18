@@ -161,6 +161,7 @@ def serve(
     game_factory: Any = None,
     client: Any = None,
     clock: Any = time.monotonic,
+    config: ServerConfig | None = None,
 ) -> Iterator[tuple[Api, SessionStore]]:
     """Abrir un GameServer real en loopback con puerto efímero y cerrarlo."""
     store = store or SessionStore()
@@ -169,7 +170,7 @@ def serve(
         ("127.0.0.1", 0),
         store,
         client or EngineClient(Stub()),
-        config=ServerConfig(model_id=MODEL_ID),
+        config=config or ServerConfig(model_id=MODEL_ID),
         game_factory=factory,
         clock=clock,
     )
@@ -911,7 +912,7 @@ def test_revelacion_logs_game_run_once_with_accumulated_usage(
     params, result, usage = calls[0]["params"], calls[0]["result"], calls[0]["usage"]
     assert params.model_id == MODEL_ID
     assert params.engine_backend == "hf-router"
-    assert params.provider == ""
+    assert params.provider == "featherless-ai"
     assert params.temperature == pytest.approx(0.9)
     assert params.top_p == pytest.approx(0.9)
     assert params.system_prompt_version == "v2"
@@ -953,3 +954,25 @@ def test_malformed_usage_metadata_logs_error_and_skips_usage(
     assert calls[0]["usage"] is None
     assert calls[0]["result"]["valid_game"] is True
     assert "Metadata de uso malformada" in caplog.text
+
+
+def test_revelacion_usa_el_provider_de_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El proveedor registrado sale de ServerConfig, no de una constante."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "src.orchestrator.server.log_game_run",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    with serve(
+        client=EngineClient(MetadataStub()),
+        config=ServerConfig(model_id=MODEL_ID, provider="together"),
+    ) as (api, _):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        _reveal(api, code, host, token2)
+    assert len(calls) == 1
+    assert calls[0]["params"].provider == "together"

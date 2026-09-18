@@ -76,13 +76,21 @@ DEFAULT_PROMPTS = (
 
 @dataclass(frozen=True)
 class ServerConfig:
-    """Configuración del motor para las peticiones del impostor (R1 hf-router)."""
+    """Configuración del motor para las peticiones del impostor (R1 hf-router).
+
+    provider es el proveedor efectivo detrás del router (un hecho del
+    despliegue, no del motor): el default coincide con la cuenta usada en
+    el experimento y se reemplaza por entorno o línea de comandos.
+    """
 
     temperature: float = 0.9
     top_p: float = 0.9
     system_prompt_version: str = "v2"
     model_id: str = field(
         default_factory=lambda: os.environ.get("SOSPECHAI_MODEL_ID", "")
+    )
+    provider: str = field(
+        default_factory=lambda: os.environ.get("SOSPECHAI_PROVIDER", "featherless-ai")
     )
 
 
@@ -245,7 +253,7 @@ class GameServer(ThreadingHTTPServer):
         params = RunParams(
             model_id=config.model_id,
             engine_backend="hf-router",
-            provider="",  # el server no conoce el proveedor por separado (R1/R2)
+            provider=config.provider,
             temperature=config.temperature,
             top_p=config.top_p,
             system_prompt_version=config.system_prompt_version,
@@ -554,6 +562,11 @@ def _parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("SOSPECHAI_MODEL_ID", ""),
         help="Modelo del engine hf-router.",
     )
+    parser.add_argument(
+        "--provider",
+        default=os.environ.get("SOSPECHAI_PROVIDER", "featherless-ai"),
+        help="Proveedor efectivo detrás del router (p. ej. featherless-ai).",
+    )
     parser.add_argument("--rounds", type=int, default=2, help="Rondas por partida.")
     parser.add_argument(
         "--max-words", type=int, default=15, help="Máximo de palabras por respuesta."
@@ -571,7 +584,7 @@ def _run_server(options: argparse.Namespace) -> None:
     """Wiring real: gRPC al engine R1, timer y servidor en primer plano."""
     address = os.environ.get("SOSPECHAI_ENGINE_ADDR", "impostor-engine:50051")
     channel = grpc.insecure_channel(address, options=[("grpc.enable_retries", 0)])
-    config = ServerConfig(model_id=options.model_id)
+    config = ServerConfig(model_id=options.model_id, provider=options.provider)
 
     def factory() -> Game:
         """Construir partidas con la configuración pedida en consola."""

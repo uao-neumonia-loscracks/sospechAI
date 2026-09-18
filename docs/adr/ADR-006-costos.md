@@ -1,124 +1,142 @@
-# ADR-006 - Unidad de facturacion del router y presupuesto del barrido
+# ADR-006 - Costo de la API: el cargo es por token y la anomalia de ~100x no existe
 
-**Fecha:** 2026-09-17 · **Estado:** propuesta
-**Decide:** R1, con visto bueno del equipo para el presupuesto del barrido A25 · **Propone:** R1 · **Consultado:** R2 (consume la metrica de costo), pendiente
+**Fecha:** 2026-09-18 · **Estado:** propuesta
+**Decide:** R1 · **Propone:** R1 · **Consultado:** R4 (el model_card cita el numero que este ADR retira), pendiente
 
 ## Contexto
 
-El numero medido que gobierna la planificacion hoy es **USD 0,23 por 143
-solicitudes** a Featherless AI, segun la pagina de Billing con ventana
-2026-09-01 a 2026-10-01. Eso da **~USD 0,0016 por llamada** con ~65 tokens por
-llamada.
+El ticket R1-9 nacio de una observacion del benchmark del 2026-09-09: **USD 0,23
+de Inference Usage por 143 solicitudes**, es decir ~USD 0,0016 por llamada,
+"cerca de 100 veces lo que sugiere la tarifa publicada por token". Ese numero
+quedo escrito en `docs/model_card.md` como pendiente de explicar, condicionaba
+el tamano del barrido experimental de A25 (9 configuraciones x 10 partidas x 6
+llamadas = 540 llamadas) y motivo este ADR.
 
-Ese numero es **dos ordenes de magnitud mayor** que lo que predice la tarifa
-publicada por token (USD 0,17/M input, USD 0,20/M output). La causa quedo sin
-confirmar desde el benchmark de R1 del 2026-09-09 y condiciona directamente el
-tamano del barrido experimental de A25: **9 configuraciones x 10 partidas x 6
-llamadas = 540 llamadas**.
+El ticket pedia diagnosticar tres cosas: si el costo por peticion varia con los
+tokens o es plano, que fraccion es prompt contra completion, y si el proveedor
+efectivo es el que creemos.
 
-La tarjeta A13 hace que el orquestador loguee la metrica `costo_estimado` en
-MLflow. Si la formula que la alimenta no representa el cargo real, la metrica
-miente y el equipo decide con un numero inventado.
+## Lo que se midio (2026-09-18)
 
-Este ADR existe para responder tres preguntas del ticket R1-9 y para dejar la
-formula de costo en un solo lugar.
+Lectura de la pagina de Billing, ventana de periodo explicita **SEP 1 - OCT 1**:
 
-## Lo que se verifico
+| Metrica | Valor |
+| --- | --- |
+| Inference Usage del periodo | **USD 0,00** (el widget lo rotula como "< USD 0,01") |
+| Solicitudes | **169**, todas a Featherless AI (Together AI: 0) |
 
-| # | Afirmacion | Evidencia |
-| --- | --- | --- |
-| 1 | El proveedor efectivo es el que creemos | Billing: 143 solicitudes a Featherless AI, 0 a Together AI |
-| 2 | El cargo no se explica por tokens | Describe 138x menos de lo cobrado |
-| 3 | La facturacion por tiempo de computo existe en la plataforma | Documentacion de HF Inference Providers |
-| 4 | El log de observabilidad por peticion no existe como artefacto | `benchmark_inference.py` imprime a stdout y no persiste nada |
-| 5 | Billing no permite desglosar por peticion | La vista de HF desglosa por modelo y proveedor |
-| 6 | El engine y `src/common/metrics.py` facturan distinto | Dos formulas divergentes en el codigo |
+Contra la linea base de 143 solicitudes del 2026-09-09 son **+26 solicitudes**:
+mis 21 llamadas de hoy (1 de diagnostico + 20 de la prueba controlada) mas 5
+que no son mias, atribuibles a actividad del equipo en los 9 dias intermedios
+(pruebas de Docker y E2E con el engine real). No hace falta explicarlas una por
+una: no cambian ninguna magnitud.
 
-### 1. El proveedor efectivo si es el esperado (pregunta 3 de R1-9)
+## Hallazgo principal: la lectura de USD 0,23 era incorrecta
 
-Billing muestra **143 solicitudes a Featherless AI y 0 a Together AI**. No hay
-reenvio silencioso a un proveedor mas caro. Coincide con lo que el engine
-reporta en `x-model-id` (`Qwen/Qwen2.5-7B-Instruct:featherless-ai`).
+**El total NO subio a USD 0,23. Sigue en USD 0,00.** Un contador acumulativo de
+un mismo periodo **no puede bajar**: si el 2026-09-09 el periodo marcaba USD
+0,23 con 143 solicitudes, hoy no puede marcar USD 0,00 con 169. Una de las dos
+lecturas es falsa.
 
-**Pregunta 3: respondida. No hay desvio de proveedor.**
+La que sobrevive es la de hoy, por dos razones:
 
-### 2. El cargo no se explica por tokens
+1. **El conteo de solicitudes si se movio** (143 -> 169) mientras el costo no.
+   Si esas 26 llamadas hubieran costado USD 0,0016 cada una, el total mostraria
+   ~USD 0,04. Muestra USD 0,00.
+2. La propia medicion del 2026-09-09 habia dejado anotada una **leccion de
+   metrologia**: las paginas de HF mostraron valores contradictorios entre si
+   (USD 0,89 y USD 0,18 y USD 0,01 en lecturas sucesivas del mismo periodo). La
+   inestabilidad de esa pagina ya estaba documentada.
 
-El benchmark midio ~65 tokens por llamada (~43 de prompt + 21,6 de completion).
-A las tarifas publicadas:
+**La anomalia de ~100x no existe.** R1-9 se creo para explicar un numero que
+estaba mal medido.
 
-```
-(43,4 x 0,17 + 21,6 x 0,20) / 1_000_000 = USD 0,0000117 por llamada
-143 x USD 0,0000117                      = USD 0,0017 total
-```
+## La pregunta 1 tiene respuesta: el cargo es por token
 
-Se cobraron **USD 0,23**. El modelo por token predice **USD 0,0017**: se queda
-corto por un factor de **~138x**. El informe previo decia "~100x" como orden de
-magnitud; el calculo exacto da ~138x.
-
-Con el limite de que la ventana de Billing incluye tambien el spike, los
-warm-ups y las pruebas de Docker y E2E, no solo las 30 muestras del benchmark.
-Eso cambia el tiempo promedio por llamada, pero no cambia el hecho de que el
-total esta dos ordenes por encima de lo que predice la tarifa por token.
-
-**Conclusion: el modelo por token no describe el cargo.**
-
-### 3. Los datos para el cruce que pedia el ticket no existen
-
-El ticket R1-9 pedia cruzar el log de observabilidad contra el detalle de las
-143 peticiones en Billing. Se verifico y **ese cruce no es posible**:
-
-- `scripts/benchmark_inference.py` imprime el resumen JSON a stdout y **no
-  persiste nada por peticion**. No hay escritura a archivo en todo el script.
-- No existe ningun `.log`, `.jsonl` ni `.csv` con las peticiones, ni en el repo
-  ni en el arbol local de trabajo.
-- La vista de Inference Providers de Hugging Face desglosa el uso **por modelo y
-  proveedor**, no por solicitud. El detalle por peticion que el ticket suponia
-  tampoco existe del lado de Billing.
-
-**Pregunta 1 del ticket ("el costo varia con los tokens o es plano"): no es
-respondible con los datos existentes.** Requiere un experimento nuevo. Queda
-propuesto abajo.
-
-### 4. Hipotesis compatible: facturacion por tiempo de computo
-
-La plataforma documenta que la facturacion puede ir por **tiempo de computo x
-precio del hardware** (el ejemplo que da HF es una peticion de 10 s en una GPU
-de USD 0,00012/s facturada USD 0,0012).
-
-Con los tiempos medidos del benchmark:
+El limite superior es lo decisivo, no ruido. "< USD 0,01" sobre 169 solicitudes
+implica:
 
 ```
-Commit total: 143 x 1,6793 s = 240,1 s
-USD 0,23 / 240,1 s          = USD 0,00096/s  =  USD 3,45 por hora de GPU
+< USD 0,01 / 169 solicitudes = < USD 0,000059 por llamada
 ```
 
-Esa tarifa es **~8x la del ejemplo de hardware que documenta HF**
-(USD 0,00012/s). Es compatible en orden de magnitud, pero **no se confirma** con
-los datos disponibles.
+Contra las tres hipotesis de facturacion:
 
-Una alternativa **igualmente compatible** es un **cargo plano por solicitud** de
-USD 0,0016. Ambas explican el total perfectamente y **no se distinguen entre si**
-sin un experimento controlado.
+| Hipotesis | Prediccion para esas 169 | Billing | Veredicto |
+| --- | --- | --- | --- |
+| Proporcional a **tokens** (tarifa publicada, ~65 tokens/llamada) | ~USD 0,003 | USD 0,00 | **compatible** |
+| **Plano** por solicitud (a USD 0,0016) | USD 0,27 | USD 0,00 | descartada |
+| Proporcional al **tiempo** de computo | USD 0,09 o mas, solo por mis 20 llamadas | USD 0,00 | descartada |
 
-### 5. Prompt vs completion (pregunta 2 de R1-9)
+**El cargo es proporcional a los tokens y consistente con la tarifa publicada.**
+Las otras dos hipotesis quedan descartadas por un margen amplio: la distancia
+entre USD 0,003 y USD 0,27 es de dos ordenes de magnitud, muy por encima de la
+resolucion de un centavo de la pagina.
 
-El ticket asume que el prompt puede ser ~85% del gasto.
+**El experimento controlado lo confirma.** Veinte llamadas en dos grupos de 10,
+a igual numero de llamadas pero con trabajo generado muy distinto:
 
-- **Bajo facturacion por token esa aritmetica es correcta**: con un system
-  prompt de ~120 tokens y una respuesta de ~20,
-  `(120 x 0,17) / (120 x 0,17 + 20 x 0,20) = 83,6%`.
-- Pero el modelo por token es justamente el que falla por 138x, asi que ese 85%
-  **no esta verificado**.
-- Lo que **si** esta medido: **TTFT = 795,0 ms de 1679,3 ms = 47,3% del tiempo
-  por llamada ocurre antes del primer token**. La generacion (884,3 ms para 21,6
-  tokens, ~24 tokens/s) es el 52,7% restante.
+| | Grupo A (cortas) | Grupo B (largas) | Ratio B/A |
+| --- | --- | --- | --- |
+| Llamadas | 10 | 10 | 1,0x |
+| Segundos | 16,7 | 77,2 | 4,6x |
+| Completion tokens | 181 | 6.199 | 34,2x |
 
-**Pregunta 2: respondida con el matiz del modelo.** Si el cargo es por tiempo,
-la fraccion que domina no es el prompt (85%) sino el tiempo previo al primer
-token (47%), y recortar respuestas ayuda **menos** de lo que sugiere el ticket.
+Costo esperado de esas 20 llamadas bajo cada hipotesis: ~USD 0,0015 por token,
+~USD 0,032 si fueran planas y ~USD 0,090 si fueran por tiempo. **Billing no se
+movio de USD 0,00**, lo que deja al modelo por token como unico sobreviviente.
 
-### 6. Dos formulas de costo divergentes en el mismo repo
+Nota de diseno: `max_tokens` **no** fuerza generaciones largas — el modelo corta
+cuando termina su respuesta. Para forzar salida larga hubo que cambiar el
+*prompt*, no el limite.
+
+## La pregunta 2: prompt contra completion
+
+El ticket asumia que el prompt podria ser ~85% del gasto. Bajo facturacion por
+token, con un system prompt de ~120 tokens y una respuesta de ~20,
+`(120 x 0,17) / (120 x 0,17 + 20 x 0,20) = 83,6%`: **la aritmetica del ticket es
+correcta**. Con el cargo confirmado como proporcional a tokens, esa estimacion
+queda en pie como criterio de reparto.
+
+Lo medido en tiempo (TTFT 795,0 ms de 1679,3 ms = 47,3% del tiempo por llamada
+es previo al primer token) sirve para la latencia y el deadline de R2, no para
+el costo.
+
+## La pregunta 3: el proveedor efectivo
+
+**Respondida dos veces, por fuentes independientes:**
+
+- **Billing:** 169 solicitudes a Featherless AI, **0 a Together AI**. No hay
+  reenvio silencioso a un proveedor mas caro.
+- **La respuesta del router** trae la cabecera
+  **`x-inference-provider: featherless-ai`**.
+
+Dato adicional: el campo `model` que devuelve el router es
+`Qwen/Qwen2.5-7B-Instruct` **sin** el sufijo `:featherless-ai` que se envia: el
+sufijo enruta, no vuelve en la respuesta.
+
+## La forma real del objeto `usage` (verificada)
+
+Se volco el objeto crudo de una llamada:
+
+```json
+{
+  "prompt_tokens": 33,
+  "completion_tokens": 8,
+  "total_tokens": 41,
+  "cached_tokens": 0
+}
+```
+
+**`cached_tokens` viene PLANO, no anidado en `prompt_tokens_details`.** Una
+hipotesis previa de este ADR (que el router seguia la forma anidada de OpenAI)
+es **falsa**: este proveedor se aparta de esa forma. La lectura original de
+`servicer.py` era la correcta y el cambio a la forma anidada **se revirtio**.
+
+Tambien se verifico que la respuesta **no trae ninguna cabecera de costo ni de
+facturacion**: el costo no es legible desde la API, solo desde Billing.
+
+## Dos formulas de costo divergentes en el mismo repo
 
 | | `src/impostor_engine/inference_client.py` | `src/common/metrics.py` |
 | --- | --- | --- |
@@ -126,122 +144,110 @@ token (47%), y recortar respuestas ayuda **menos** de lo que sugiere el ticket.
 | Cacheados | Se **suman** al prompt completo | Se **restan** del prompt facturable |
 | Tarifas | Constantes fijas | Parametro `Pricing` |
 
-La convencion OpenAI-compatible (el engine pega contra
-`https://router.huggingface.co/v1`) incluye los tokens cacheados **dentro** de
-`prompt_tokens`. Por lo tanto la formula del engine **cobra los cacheados dos
-veces**, y `src/common/metrics.py` es la correcta.
+La convencion OpenAI-compatible incluye los tokens cacheados **dentro** de
+`prompt_tokens`. Bajo ese supuesto la formula del engine **cobra los cacheados
+dos veces** y `src/common/metrics.py` es la correcta.
 
-Ademas, `servicer.py` lee `usage.get("cached_tokens", 0)` con la clave plana,
-cuando la convencion OpenAI-compatible la anida en
-`prompt_tokens_details.cached_tokens`. Si eso es asi, los cacheados valen 0 hoy
-y el doblecobro esta **latente**: se activa el dia que se encienda el cacheo de
-prompt, que es justamente la mitigacion que sugiere el ticket. **Este ADR no
-asume esa forma sin verificarla.**
+**Estado de ese supuesto: inferido, no verificado.** El `usage` real devuelve
+`cached_tokens: 0`, asi que la pertenencia de los cacheados al prompt **no es
+observable todavia**: solo se verifica el dia que el cacheo de prompt produzca
+`cached_tokens > 0`. Hasta entonces las dos formulas dan el **mismo resultado**
+y el doblecobro permanece **latente**.
 
-Hay una tercera consecuencia: **el engine calcula `cost_usd` en
-`servicer.py:338` pero no lo emite en la metadata** (la lista manda
-`x-usage-*` y `x-latency-*`, sin costo), por eso el orquestador tuvo que
-recalcularlo. Eso es lo que creo la duplicacion.
+Hay una tercera consecuencia: el engine calcula `cost_usd` en `servicer.py:338`
+pero **no lo emite en la metadata** (la lista manda `x-usage-*` y `x-latency-*`,
+sin costo), por eso el orquestador tuvo que recalcularlo. Eso es lo que creo la
+duplicacion.
 
 ## Decision propuesta
 
-1. **El numero que gobierna la planificacion es el medido, no el estimado.**
-   Hasta nueva medicion, el presupuesto se calcula con **USD 0,0016 por
-   llamada**. `costo_estimado` se reporta como estimacion por token, nunca como
-   el cargo real.
+1. **Retirar el numero de USD 0,23 y su derivado de ~USD 0,0016 por llamada.**
+   Son incorrectos. Hay que sacarlos de `docs/model_card.md` (linea del resumen
+   de costo) y de `docs/verificaciones/2026-09-09-benchmark-r1.md` (seccion
+   "Costo y presupuesto"), y reemplazarlos por la lectura del 2026-09-18: **USD
+   0,00 para 169 solicitudes**, con el limite de < USD 0,000059 por llamada.
+   Dejarlos seria publicar en la entrega un numero que este ADR demuestra falso.
 
-2. **Una sola fuente de verdad para la formula de costo**:
-   `src/common/metrics.py`. El engine la importa (AGENTS.md lo permite
-   explicitamente) y se elimina su copia local: `estimate_cost_usd` y las tres
-   constantes de `inference_client.py`.
+2. **El costo se estima por token a las tarifas publicadas.** El modelo por
+   token, que era el que "no explicaba" el cargo, resulta ser el correcto. La
+   metrica `costo_estimado` de A13 es utilizable como esta.
 
-3. **Tarifas canonicas en USD por 1K**, tomadas del engine y convertidas:
-   prompt `0,00017` · completion `0,0002` · cached `0,000136`. Con eso `Pricing`
-   puede tener valores por defecto, que es lo que hoy bloquea su comentario
-   "los valores reales los fija el ADR-006, que todavia no existe".
+3. **Una sola fuente de verdad para la formula**: `src/common/metrics.py`, con
+   las tarifas canonicas en USD por 1K (`0,00017` / `0,0002` / `0,000136`). El
+   engine delega en ella y se elimino su copia local.
 
-4. **Los cacheados se facturan una sola vez**:
-   `billable_prompt = prompt_tokens - cached_tokens`. Es la unica formula
-   coherente con la convencion OpenAI-compatible.
+4. **El presupuesto del barrido A25 deja de ser un problema.** 540 llamadas a
+   tarifa publicada rondan **USD 0,01**: es practicamente gratis. Ya no hay
+   razon economica para recortar el experimento; si algo, ahora se puede
+   ampliar.
 
-5. **El barrido A25 es pagable.** 540 llamadas x USD 0,0016 = **USD 0,86**
-   contra **USD 5,00** de saldo: **~5,8x de margen**. El saldo alcanza para
-   ~3.125 llamadas. El riesgo del barrido **no es el dinero**.
-
-6. **Antes de comprometer el barrido, una prueba controlada de ~USD 0,40 que
-   decida la unidad de facturacion.** La pregunta 1 no se puede contestar con lo
-   que hay, y la respuesta cambia la estrategia de A25.
+5. **La estrategia "menos llamadas y mas largas" pierde su base.** Nacia de la
+   hipotesis de facturacion por tiempo o de un cargo plano por solicitud, ambas
+   descartadas. El eje de ahorro pasa a ser el volumen de tokens, no el numero
+   de llamadas.
 
 ## Alternativas
 
-- **A. Dejar las dos formulas como estan** (rechazada). Dos implementaciones del
-  mismo concepto que dan numeros distintos para la misma llamada es un defecto,
-  y el doblecobro de cacheados se activa en cuanto se encienda el cacheo.
+- **A. Mantener el numero de USD 0,23 y marcar la pregunta 1 como no
+  concluyente** (rechazada). El techo de "< USD 0,01" sobre 169 solicitudes es
+  un dato duro que descarta dos de las tres hipotesis por dos ordenes de
+  magnitud. Declarar no concluyente algo que la medicion resuelve deja un
+  supuesto falso circulando.
 
-- **B. Seguir planificando con el modelo por token** (rechazada). Predice 138x
-  menos de lo que se cobra. Planificar el barrido con ese numero llevaria a
-  creer que 540 llamadas cuestan USD 0,0063.
+- **B. Explicar el USD 0,00 como "Featherless no factura a esta escala"**
+  (rechazada como conclusion). Es una explicacion posible, pero **no es la mas
+  parsimoniosa**: no hace falta postular una cuota gratuita cuando el modelo por
+  token ya predice ~USD 0,003 para estas 169 solicitudes, un valor que tambien
+  se muestra como USD 0,00. Queda anotada como ambiguedad residual abajo.
 
-- **C. Adoptar el modelo por tiempo de computo como verdad** (rechazada por
-  ahora). Es compatible con los datos, pero ~8x el ejemplo documentado por HF y
-  sin confirmacion de la tarifa de Featherless. Adoptarlo seria cambiar un
-  supuesto no verificado por otro.
-
-- **D. Adoptar un cargo plano por solicitud** (rechazada por ahora). Igual de
-  compatible con el total que la hipotesis por tiempo, e igual de no confirmada.
-
-- **E. Reducir el barrido de A25 para gastar menos** (rechazada). Con 5,8x de
-  margen, recortar el experimento cambiaria valor cientifico por un ahorro de
+- **C. Seguir planificando con USD 0,0016 por llamada para no arriesgar** (rechazada).
+  Sobrestima el costo 140x y llevaria a recortar un experimento que cuesta
   centavos.
+
+- **D. Gastar mas para separar "por token" de "gratis a esta escala"**
+  (rechazada). Separarlas exigiria generar mas de USD 0,01 de uso previsto por
+  token, unas 150 llamadas largas, y **no cambia ninguna decision**: en ambos
+  casos el barrido es practicamente gratis.
 
 ## Consecuencias
 
 **Positivas**
 
-- `costo_estimado` pasa a ser una metrica con una unica formula, testeable y
-  coherente con la convencion del proveedor.
-- A25 queda desbloqueado con un presupuesto defendible: ~USD 0,86 de USD 5,00.
-- El ADR deja por escrito que el cruce que pedia el ticket no era posible, para
-  que nadie lo vuelva a intentar con los mismos datos.
+- A25 queda desbloqueado sin restriccion economica. El riesgo del barrido no
+  era el dinero, y ahora esta demostrado.
+- `costo_estimado` en MLflow pasa a ser una metrica con base empirica.
+- Se retira un numero falso antes de que llegue a la entrega final.
 
 **A vigilar**
 
-- Si el cargo es por tiempo, la estrategia correcta es **menos llamadas y mas
-  largas** (amortizar el 47,3% de tiempo previo al primer token) y **cacheo de
-  prompt** para recortar el prefill. Recortar respuestas ayuda menos de lo que
-  sugiere el ticket.
-- Si el cargo es **plano por solicitud**, nada de lo anterior importa: solo
-  importa el numero de llamadas, y ahi el barrido de 540 se vuelve mas caro de
-  lo previsto.
-- El benchmark midio con un **prompt fijo de ~43 tokens**. El juego real usa un
-  system prompt de ~120 tokens y puede regenerar. Si el cargo es por tiempo, la
-  sensibilidad al tamano del prompt es baja; si es plano, nula. Igual conviene
-  **re-medir una partida real** antes de comprometer el barrido.
-- La pagina de Billing ya mostro **lecturas inconsistentes** entre si (Billing
-  vs "Models breakdown"). La prueba controlada tiene que leer Billing con su
-  ventana de periodo explicita y contrastar con el numero de solicitudes.
+- **El model_card y el benchmark siguen citando el numero retirado** hasta que
+  se corrijan. Es el riesgo mas concreto de este ADR.
+- La ambiguedad residual (tarifa por token contra cuota gratuita) no afecta
+  ninguna decision, pero conviene no presentar como "tarifa confirmada" lo que
+  es "consistente con la tarifa publicada".
 
 **Impacto en el equipo**
 
-- R2 consume la metrica; el cambio de formula y las tarifas por defecto le
-  cambian los valores de `costo_estimado` en MLflow (a la baja, porque los
-  cacheados se descuentan).
-- Emitir el costo en la metadata del engine (`x-cost-usd`) seria un cambio de
-  contrato gRPC y **no se hace en este ADR**: queda propuesto para que R1 y R2
-  lo acuerden.
+- R2 consume la metrica; los valores de `costo_estimado` quedan como estaban
+  conceptualmente. El cambio de formula unificado es **inocuo hoy**, porque
+  `cached_tokens` es 0 en este proveedor.
+- Emitir el costo en la metadata gRPC (`x-cost-usd`) seria un cambio de
+  contrato: queda propuesto, no implementado.
+- R4 es dueno del `model_card` y tiene que aplicar la retraccion del punto 1.
 
 ## Pendiente de verificar
 
-Este ADR **no asume** la unidad real de facturacion del router, ni la tarifa de
-Featherless, ni que `cached_tokens` llegue anidado. Queda propuesto:
+**1. Ambiguedad residual de la unidad de facturacion.** Los datos confirman que
+el cargo **no** es plano ni por tiempo de computo, y que es **consistente con la
+tarifa publicada por token**. No distinguen entre "se factura por token" y
+"Featherless esta dentro de una cuota gratuita a esta escala". Se resolverse
+requeriria generar mas de USD 0,01 de uso previsto (~150 llamadas largas), y no
+cambia ninguna decision.
 
-**Prueba controlada (~USD 0,40):** 20 llamadas con `max_tokens=8` contra 20
-llamadas con `max_tokens=512`, mismo prompt y mismo modelo. Si los dos grupos
-cuestan lo mismo, el cargo es **plano por solicitud**. Si el grupo largo cuesta
-mas, el cargo es **proporcional a tokens o a tiempo**. Se lee el delta en
-Billing con su ventana de periodo explicita.
+**2. La semantica de los cacheados.** Sigue inobservable mientras
+`cached_tokens` sea 0. Se verifica el dia que se encienda el cacheo de prompt:
+si el costo por llamada BAJA, los cacheados estaban incluidos en el prompt.
 
-**Verificacion de la forma de `usage`:** una sola llamada con
-`stream_options.include_usage=true`, registrando el objeto `usage` crudo, para
-confirmar si los cacheados vienen en `prompt_tokens_details.cached_tokens`. Hoy
-`sentencia` no se puede confirmar ni refutar desde el repo.
+**3. La tarifa vigente de Featherless.** No se confirmo contra la pagina de
+precios; los numeros usados son los que el equipo ya tenia (USD 0,17/M input,
+USD 0,20/M output).

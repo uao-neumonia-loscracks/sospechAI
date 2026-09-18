@@ -89,6 +89,12 @@ def _submit_message(state: Any, text: str) -> None:
     _mutate(state, api.submit_message, text)
 
 
+def _submit_vote(state: Any, suspect: str) -> None:
+    """Emitir el voto humano y refrescar la instantánea (D3, contrato §6.6)."""
+
+    _mutate(state, api.submit_vote, suspect)
+
+
 def _snapshot_sig(snapshot: Any) -> tuple[Any, ...] | None:
     """Resumen observable de la instantánea para decidir si re-renderizar."""
 
@@ -115,6 +121,7 @@ def main() -> None:
         render_chat,
         render_consent,
         render_lobby,
+        render_revelation,
         render_voting,
     )
 
@@ -132,6 +139,7 @@ def main() -> None:
         Screen.LOBBY: render_lobby,
         Screen.CHAT: render_chat,
         Screen.VOTING: render_voting,
+        Screen.REVELATION: render_revelation,
     }
     context = ScreenContext(
         room_identity=state.get("room_identity"),
@@ -142,6 +150,7 @@ def main() -> None:
         on_join_room=lambda room_code: _join_room(state, room_code),
         on_start_room=lambda: _start_room(state),
         on_submit_message=lambda text: _submit_message(state, text),
+        on_submit_vote=lambda suspect: _submit_vote(state, suspect),
     )
     renderers[screen](context)
 

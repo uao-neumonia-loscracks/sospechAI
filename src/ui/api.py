@@ -83,6 +83,8 @@ class SospechAI(Protocol):
 
     def submit_message(self, room_code: str, session_token: str, text: str) -> None: ...
 
+    def submit_vote(self, room_code: str, session_token: str, suspect: str) -> None: ...
+
 
 def create_room() -> RoomIdentity:
     """Crear una sala y unirse como anfitrión ("Jugador 1")."""
@@ -112,6 +114,11 @@ def open_voting(room_code: str, session_token: str) -> None:
 def submit_message(room_code: str, session_token: str, text: str) -> None:
     """Enviar un mensaje de ronda validado por la fuente."""
     _source().submit_message(room_code.upper(), session_token, text)
+
+
+def submit_vote(room_code: str, session_token: str, suspect: str) -> None:
+    """Emitir el voto de un humano contra POST /rooms/{code}/votes (contrato §6.6)."""
+    _source().submit_vote(room_code.upper(), session_token, suspect)
 
 
 def _source() -> SospechAI:

@@ -29,6 +29,7 @@ from src.ui.api import (
     open_voting,
     start,
     submit_message,
+    submit_vote,
 )
 from src.ui.sources.http import HttpSospechAI
 from src.ui.words import count_words, within_limit
@@ -55,6 +56,7 @@ RESULT_KEYS = (
     "valid_game",
     "interruption_reason",
     "tasa_deteccion",
+    "prompt_version",
     "transcript",
 )
 
@@ -64,6 +66,19 @@ def _started_room() -> tuple[RoomIdentity, RoomIdentity]:
     host = create_room()
     guest = join_room(host.room_code)
     start(host.room_code, host.session_token)
+    return host, guest
+
+
+def _voting_room() -> tuple[RoomIdentity, RoomIdentity]:
+    """Avançar la máquina hasta VOTACION con dos humanos (solo Arrange)."""
+    host, guest = _started_room()
+    submit_message(
+        host.room_code, host.session_token, "Yo creo que el problema fue la luz."
+    )
+    submit_message(
+        host.room_code, guest.session_token, "Buscaría una cafetería para terminar."
+    )
+    open_voting(host.room_code, host.session_token)
     return host, guest
 
 
@@ -283,6 +298,130 @@ def test_open_voting_y_poll_revelan_el_resultado() -> None:
     assert sum(message["is_ai"] for message in revealed.result["transcript"]) == 2
 
 
+def test_result_del_fake_emite_prompt_version_v2() -> None:
+    """El fake emite la clave aditiva prompt_version "v2" (contrato v1.1 §7.2)."""
+    # Arrange
+    host, _ = _voting_room()
+
+    # Act
+    get_state(host.room_code, host.session_token)
+    revealed = get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert revealed.result["prompt_version"] == "v2"
+
+
+def test_submit_vote_feliz_registra_y_revela_en_el_siguiente_poll() -> None:
+    """Un voto humano aceptado (204) se registra y el poll cierra en REVELACION."""
+    # Arrange
+    host, _ = _voting_room()
+    get_state(host.room_code, host.session_token)
+
+    # Act
+    submit_vote(host.room_code, host.session_token, "Jugador 2")
+    revealed = get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert revealed.state == "REVELACION"
+    assert revealed.votes_received == 2
+    assert revealed.result["votes"]["Jugador 1"] == "Jugador 2"
+    assert "Jugador 2" in revealed.result["votes"]
+
+
+def test_submit_vote_de_todos_los_humanos_revela_sin_guion() -> None:
+    """Con voto real de todos los humanos, el poll cierra sin llenado scriptado."""
+    # Arrange
+    host, guest = _voting_room()
+    get_state(host.room_code, host.session_token)
+
+    # Act
+    submit_vote(host.room_code, host.session_token, "Jugador 2")
+    submit_vote(guest.room_code, guest.session_token, "Jugador 1")
+    revealed = get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert revealed.state == "REVELACION"
+    assert revealed.result["votes"] == {
+        "Jugador 1": "Jugador 2",
+        "Jugador 2": "Jugador 1",
+    }
+    assert revealed.votes_received == 2
+
+
+def test_submit_vote_a_uno_mismo_es_self_vote() -> None:
+    """Votar por el propio alias devuelve self_vote (400) y no registra (§6.6/§8)."""
+    # Arrange
+    host, _ = _voting_room()
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        submit_vote(host.room_code, host.session_token, "Jugador 1")
+    snapshot = get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert exc_info.value.code == "self_vote"
+    assert exc_info.value.http_status == 400
+    assert snapshot.state == "VOTACION"
+    assert snapshot.votes_received == 0
+
+
+def test_segundo_voto_del_mismo_humano_es_duplicate_vote() -> None:
+    """Un segundo voto del mismo jugador devuelve duplicate_vote (409)."""
+    # Arrange
+    host, _ = _voting_room()
+    submit_vote(host.room_code, host.session_token, "Jugador 2")
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        submit_vote(host.room_code, host.session_token, "Jugador 3")
+
+    # Assert
+    assert exc_info.value.code == "duplicate_vote"
+    assert exc_info.value.http_status == 409
+
+
+def test_submit_vote_con_sospechoso_no_jugador_es_not_a_player() -> None:
+    """Un sospechoso que no es jugador de la sala devuelve not_a_player (403)."""
+    # Arrange
+    host, _ = _voting_room()
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        submit_vote(host.room_code, host.session_token, "Jugador 99")
+
+    # Assert
+    assert exc_info.value.code == "not_a_player"
+    assert exc_info.value.http_status == 403
+
+
+def test_submit_vote_con_token_invalido_es_session_expired() -> None:
+    """Un token desconocido al votar devuelve session_expired (401, §8)."""
+    # Arrange
+    host, _ = _voting_room()
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        submit_vote(host.room_code, "token_no_emitido", "Jugador 2")
+
+    # Assert
+    assert exc_info.value.code == "session_expired"
+    assert exc_info.value.http_status == 401
+
+
+def test_submit_vote_fuera_de_votacion_es_wrong_state() -> None:
+    """Enviar un voto antes de VOTACION devuelve wrong_state (409)."""
+    # Arrange
+    host, _ = _started_room()
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        submit_vote(host.room_code, host.session_token, "Jugador 2")
+
+    # Assert
+    assert exc_info.value.code == "wrong_state"
+    assert exc_info.value.http_status == 409
+
+
 def test_get_state_de_sala_desconocida_es_room_not_found() -> None:
     """Una sala que no existe devuelve room_not_found (404, contrato §8)."""
     # Arrange
@@ -452,6 +591,8 @@ class _TestRoom:
     host_token: str = ""
     ai_added: bool = False
     messages: list[dict] = dataclasses.field(default_factory=list)
+    votes: dict[str, str] = dataclasses.field(default_factory=dict)
+    result: dict | None = None
     remaining_seconds: float | None = None
 
 
@@ -491,6 +632,8 @@ class _ContractHandler(BaseHTTPRequestHandler):
             return self._op_state, (parts[1],)
         if self.command == "POST" and len(parts) == 3 and parts[2] == "messages":
             return self._op_messages, (parts[1],)
+        if self.command == "POST" and len(parts) == 3 and parts[2] == "votes":
+            return self._op_votes, (parts[1],)
         if (
             self.command == "POST"
             and len(parts) == 4
@@ -553,9 +696,9 @@ class _ContractHandler(BaseHTTPRequestHandler):
             "max_words": room.max_words,
             "players": players,
             "messages": [dict(message) for message in room.messages],
-            "votes_received": 0,
+            "votes_received": len(room.votes),
             "remaining_seconds": room.remaining_seconds,
-            "result": None,
+            "result": room.result,
         }
         self._send_json(200, body)
 
@@ -586,6 +729,28 @@ class _ContractHandler(BaseHTTPRequestHandler):
             {"round_number": room.round_number, "alias": alias, "text": normalized}
         )
         self._advance_round(room)
+        self._send_no_content()
+
+    def _op_votes(self, token: str | None, code: str) -> None:
+        room = self._room(code)
+        alias = self._alias_for(room, token)
+        if room.state != "VOTACION":
+            raise _TestApiError(
+                "wrong_state", 409, "Los votos solo se emiten en votación."
+            )
+        suspect = self._payload().get("suspect", "")
+        players = list(room.tokens.values())
+        if room.ai_added:
+            players.append(f"Jugador {len(players) + 1}")
+        if suspect not in players:
+            raise _TestApiError(
+                "not_a_player", 403, "El sospechoso no es jugador de la sala."
+            )
+        if suspect == alias:
+            raise _TestApiError("self_vote", 400, "No puedes votar por ti mismo.")
+        if alias in room.votes:
+            raise _TestApiError("duplicate_vote", 409, "Ya emitiste tu voto.")
+        room.votes[alias] = suspect
         self._send_no_content()
 
     def _op_voting_open(self, token: str | None, code: str) -> None:
@@ -695,6 +860,23 @@ def _http_started_room(client: HttpSospechAI) -> tuple[RoomIdentity, RoomIdentit
     host = client.create_room()
     guest = client.join_room(host.room_code)
     client.start(host.room_code, host.session_token)
+    return host, guest
+
+
+def _http_voting_room(client: HttpSospechAI) -> tuple[RoomIdentity, RoomIdentity]:
+    """Avançar por HTTP hasta VOTACION con dos humanos (solo Arrange)."""
+    host, guest = _http_started_room(client)
+    client.submit_message(host.room_code, host.session_token, "Yo creo que fue la luz.")
+    client.submit_message(
+        host.room_code, guest.session_token, "Buscaría otra conexión."
+    )
+    client.submit_message(
+        host.room_code, host.session_token, "Me parece bien, seguimos."
+    )
+    client.submit_message(
+        host.room_code, guest.session_token, "Coincido con el equipo."
+    )
+    client.open_voting(host.room_code, host.session_token)
     return host, guest
 
 
@@ -820,6 +1002,91 @@ def test_unirse_tras_start_es_wrong_state_por_http(http_contract: str) -> None:
     # Assert
     assert exc_info.value.code == "wrong_state"
     assert exc_info.value.http_status == 409
+
+
+@pytest.mark.integration
+def test_submit_vote_por_http_204_y_registra_el_voto(http_contract: str) -> None:
+    """submit_vote por HTTP llega a POST /rooms/{code}/votes y recibe 204."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host, _ = _http_voting_room(client)
+
+    # Act
+    client.submit_vote(host.room_code, host.session_token, "Jugador 2")
+    snapshot = client.get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert ("POST", f"/rooms/{host.room_code}/votes", host.session_token) in (
+        _ContractHandler.request_log
+    )
+    assert snapshot.votes_received == 1
+
+
+@pytest.mark.integration
+def test_submit_vote_por_http_self_vote_es_400(http_contract: str) -> None:
+    """El 400 con código self_vote se traduce a ApiError por `code` (§8)."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host, _ = _http_voting_room(client)
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        client.submit_vote(host.room_code, host.session_token, host.alias)
+
+    # Assert
+    assert exc_info.value.code == "self_vote"
+    assert exc_info.value.http_status == 400
+
+
+@pytest.mark.integration
+def test_submit_vote_por_http_duplicate_vote_es_409(http_contract: str) -> None:
+    """El 409 con código duplicate_vote se traduce a ApiError por `code` (§8)."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host, _ = _http_voting_room(client)
+    client.submit_vote(host.room_code, host.session_token, "Jugador 2")
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        client.submit_vote(host.room_code, host.session_token, "Jugador 3")
+
+    # Assert
+    assert exc_info.value.code == "duplicate_vote"
+    assert exc_info.value.http_status == 409
+
+
+@pytest.mark.integration
+def test_get_state_tolera_result_v10_sin_prompt_version(
+    http_contract: str,
+) -> None:
+    """Un servidor v1.0 (result sin prompt_version) no rompe el transporte (§13)."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host, _ = _http_started_room(client)
+    room = _ContractHandler.rooms[host.room_code]
+    room.state = "REVELACION"
+    room.result = {
+        "state": "REVELACION",
+        "impostor_alias": "Jugador 3",
+        "rounds": 2,
+        "max_words": 15,
+        "votes": {"Jugador 1": "Jugador 3"},
+        "vote_counts": {"Jugador 3": 1},
+        "scores": {"Jugador 1": 1},
+        "valid_game": True,
+        "interruption_reason": None,
+        "tasa_deteccion": 1.0,
+        "transcript": [],
+    }
+
+    # Act
+    snapshot = client.get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert snapshot.state == "REVELACION"
+    assert snapshot.result["impostor_alias"] == "Jugador 3"
+    assert snapshot.result["tasa_deteccion"] == 1.0
+    assert "prompt_version" not in snapshot.result
 
 
 @pytest.mark.integration

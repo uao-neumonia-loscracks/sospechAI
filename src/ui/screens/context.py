@@ -22,3 +22,4 @@ class ScreenContext:
     on_join_room: Callable[[str], None] | None = None
     on_start_room: Callable[[], None] | None = None
     on_submit_message: Callable[[str], None] | None = None
+    on_submit_vote: Callable[[str], None] | None = None

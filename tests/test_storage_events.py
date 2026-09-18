@@ -158,7 +158,7 @@ def test_practice_games_survive_alongside_game_events(tmp_path: Path) -> None:
     try:
         practice = list(
             connection.execute(
-                "SELECT id, session_kind, payload FROM practice_games ORDER BY id"
+                "SELECT id, session_kind, payload FROM practice_games ORDER BY rowid"
             )
         )
         event_types = list(

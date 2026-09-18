@@ -65,6 +65,15 @@ class HttpSospechAI:
             {"text": text},
         )
 
+    def submit_vote(self, room_code: str, session_token: str, suspect: str) -> None:
+        """POST /rooms/{code}/votes: emitir el voto de un humano (204, contrato §6.6)."""
+        self._request(
+            "POST",
+            f"/rooms/{self._code(room_code)}/votes",
+            session_token,
+            {"suspect": suspect},
+        )
+
     def _request(
         self,
         method: str,

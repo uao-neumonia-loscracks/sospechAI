@@ -41,13 +41,15 @@ def latency_p95(latencies_ms: Sequence[float]) -> float | None:
 class Pricing:
     """Tarifas del proveedor en USD por cada mil tokens.
 
-    Los valores reales los fija el ADR-006, que todavía no existe; por eso
-    no se definen valores por defecto en esta estructura.
+    Los valores por defecto son las tarifas publicadas convertidas a USD por
+    1K, fijadas por el ADR-006 (docs/adr/ADR-006-costos.md): prompt 0,00017,
+    completion 0,0002 y cached 0,000136. Por eso Pricing() ya representa las
+    tarifas canónicas sin argumentos.
     """
 
-    prompt_per_1k_usd: float
-    completion_per_1k_usd: float
-    cached_per_1k_usd: float
+    prompt_per_1k_usd: float = 0.00017
+    completion_per_1k_usd: float = 0.0002
+    cached_per_1k_usd: float = 0.000136
 
 
 def estimated_cost_usd(

@@ -1,6 +1,6 @@
 # Contrato UI–Orquestador — sospechAI
 
-**Versión**: 1.0 · **Fecha**: 2026-09-16 · **Estado**: CONGELADO para R2 (cambios exclusivamente aditivos; ver §14)
+**Versión**: 1.1 · **Fecha**: 2026-09-17 · **Estado**: CONGELADO para R2 (cambios exclusivamente aditivos; ver §13 y §15)
 
 **Ticket**: R2-1 / A9 — "Contrato UI-orquestador y servidor multijugador"
 
@@ -24,7 +24,7 @@ Este documento es la única fuente de verdad de la interfaz entre el rol UI (R3)
 **Fuera del alcance (explícitamente NO resuelto aquí)**
 
 - Persistencia activa / recuperación de partidas (ticket A8).
-- Plazos (deadlines) para DISCUSION/VOTACION (ADR-003 pendiente): VOTACION espera a todos los humanos; sin cuenta atrás.
+- Plazos (deadlines) para DISCUSION/VOTACION en v1.0 (ADR-003 pendiente): VOTACION esperaba a todos los humanos sin cuenta atrás. La v1.1 añade ventanas por fase con cierre por quórum, sin romper a los clientes v1.0 (§12).
 - El cliente UI en sí (entregable de R3; `src/ui/` no existe).
 - Cualquier dependencia Python nueva (runtime: grpcio, protobuf, python-dotenv únicamente).
 - Cambios en `src/orchestrator/game.py` (dominio reutilizado SIN cambios) ni `src/orchestrator/storage.py`.
@@ -81,12 +81,12 @@ Los valores de `state` en el cable son **cadenas fijas y CONGELADOS para R2**. N
 | `"LOBBY"` | Sala creada; unión de humanos; antes de `start` | no |
 | `"RONDA"` | Ronda de mensajes; `round_number` distingue rondas (RONDA(n+1)); ventana de 20 s | no |
 | `"DISCUSION"` | Debate previo a votación | no |
-| `"VOTACION"` | Votación; espera a todos los humanos (sin plazo) | no |
+| `"VOTACION"` | Votación con ventana propia; cierra al votar/abstenerse todos o al vencer con quórum | no |
 | `"REVELACION"` | Fin de partida; `result` embebido en la instantánea | sí |
 
 - **Nombres de estados**: `LOBBY` (inglés, por dominio) y cuatro valores en español congelados: `RONDA`, `DISCUSION`, `VOTACION`, `REVELACION`. **Estos cuatro valores en español no se traducen ni cambian.**
-- **Transiciones**: LOBBY → RONDA (`start`); RONDA(n) → RONDA(n+1) (último mensaje de la ronda); tras la ronda final → DISCUSION; DISCUSION → VOTACION (`open_voting`); VOTACION → REVELACION (último voto humano, o interrupción). Camino de interrupción: {RONDA, DISCUSION, VOTACION} → REVELACION.
-- **Razones de interrupción** (aparecen como `interruption_reason` en `result()`, **no** son códigos de error HTTP): `round_timeout` | `engine_timeout` | `engine_unavailable` | `engine_protocol` | `engine_rejected` | `invalid_engine_response`.
+- **Transiciones**: LOBBY → RONDA (`start`); RONDA(n) → RONDA(n+1) (último mensaje de la ronda); tras la ronda final → DISCUSION; DISCUSION → VOTACION (`open_voting` o vencimiento de DISCUSION, v1.1); VOTACION → REVELACION (último voto humano, vencimiento de VOTACION con quórum, o interrupción). Camino de interrupción: {RONDA, DISCUSION, VOTACION} → REVELACION.
+- **Razones de interrupción** (aparecen como `interruption_reason` en `result()`, **no** son códigos de error HTTP): `round_timeout` | `quorum_lost` | `engine_timeout` | `engine_unavailable` | `engine_protocol` | `engine_rejected` | `invalid_engine_response`.
 
 ---
 
@@ -169,7 +169,7 @@ Respuesta `204 No Content`.
 
 Errores: `session_expired` (401), `not_a_player` (403), `forbidden_host_action` (403), `wrong_state` (409, no DISCUSION).
 
-### 6.6 `POST /rooms/{room_code}/votes` — emitir voto
+### 6.6 `POST /rooms/{room_code}/votes` — emitir voto o abstenerse (v1.1)
 
 Petición:
 
@@ -181,9 +181,11 @@ Petición:
 
 El votante se asocia desde el token. El voto dispara el revelado automático cuando **todos los humanos** han votado; nadie puede votar dos veces; la IA no vota; no se permite el voto a uno mismo.
 
-Respuesta `204 No Content`.
+**Abstención explícita (v1.1)**: enviar el sentinel reservado `"__abstain__"` como `suspect`. La abstención cierra la votación como un voto más (cuenta como humano presente para el quórum), pero se registra como **voto nulo**: `null` en `result().votes` (§7.2). No participa en `vote_counts`, `scores` ni `tasa_deteccion`. Fuera de VOTACION, el sentinel obedece la máquina de estados (→ `wrong_state`).
 
-Errores: `session_expired` (401), `not_a_player` (403, token o `suspect` no son jugadores de la sala), `wrong_state` (409, no VOTACION), `self_vote` (400), `duplicate_vote` (409), `ai_cannot_vote` (403).
+Respuesta `204 No Content` (voto o abstención).
+
+Errores: `session_expired` (401), `not_a_player` (403, token o `suspect` no son jugadores de la sala), `wrong_state` (409, no VOTACION; incluye el sentinel fuera de VOTACION), `self_vote` (400), `duplicate_vote` (409, segundo voto o segunda abstención del mismo humano), `malformed_request` (400, `suspect` ausente o no es cadena), `ai_cannot_vote` (403).
 
 ### 6.7 `GET /rooms/{room_code}/state` — instantánea de estado
 
@@ -209,8 +211,8 @@ Errores: `session_expired` (401), `not_a_player` (403), `room_not_found` (404).
 | `max_words` | number | Límite de palabras por mensaje (default 15) |
 | `players` | string[] | **Solo alias** ("Jugador N"), incluyendo a la IA |
 | `messages` | object[] | `{round_number, alias, text}` |
-| `votes_received` | number | **Solo recuento** (nunca el detalle de votos) |
-| `remaining_seconds` | number \| null | Segundos restantes de la ventana de RONDA |
+| `votes_received` | number | **Solo recuento** (nunca el detalle de votos); cuenta humanos que votaron o se abstuvieron explícitamente |
+| `remaining_seconds` | number \| null | Segundos restantes de la ventana de la fase vigente (RONDA/DISCUSION/VOTACION); `null` en LOBBY y REVELACION |
 | `result` | object \| null | **Solo en REVELACION**; cuerpo de `result()` (§7.2) |
 
 Ejemplo (RONDA, ronda 1):
@@ -239,12 +241,12 @@ Ejemplo (RONDA, ronda 1):
 | `impostor_alias` | string | Alias de la IA revelado aquí |
 | `rounds` | number | Total de rondas |
 | `max_words` | number | Límite de palabras |
-| `votes` | object | `{voter: suspect}` — detalle de votos, solo aquí |
+| `votes` | object | `{voter: suspect}` — detalle de votos, solo aquí; abstención explícita o forzada = `null` (v1.1) |
 | `vote_counts` | object | Recuento por sospechoso |
 | `scores` | object | `{alias: 0\|1}`; `{}` si partida interrumpida |
 | `valid_game` | boolean | `false` si interrumpida |
 | `interruption_reason` | string \| null | Código de interrupción o `null` |
-| `tasa_deteccion` | float \| null | `null` si interrumpida |
+| `tasa_deteccion` | float \| null | `null` si interrumpida o si no hay votos escrutables (p. ej. todos se abstuvieron); la validez la decide `valid_game` |
 | `prompt_version` | string \| null | Versión del prompt del impostor; default "v2" |
 | `transcript` | object[] | `{round_number, alias, text, is_ai}` — **el único lugar donde se revela `is_ai`** |
 
@@ -319,7 +321,7 @@ Formato de error (siempre que el estado HTTP no sea 2xx):
 | `invalid_roster` | 409 | `start` con menos de 2 humanos en la sala |
 | `internal` | 500 | Error inesperado del servidor |
 
-**Aclaración**: los códigos de interrupción (`round_timeout`, `engine_timeout`, `engine_unavailable`, `engine_protocol`, `engine_rejected`, `invalid_engine_response`) **no** son códigos de error HTTP: se transportan como `interruption_reason` dentro del `result` de REVELACION (§7.2).
+**Aclaración**: los códigos de interrupción (`round_timeout`, `quorum_lost`, `engine_timeout`, `engine_unavailable`, `engine_protocol`, `engine_rejected`, `invalid_engine_response`) **no** son códigos de error HTTP: se transportan como `interruption_reason` dentro del `result` de REVELACION (§7.2).
 
 ---
 
@@ -341,7 +343,7 @@ La UI **debe** tratarlas como secretas: no dibujar `is_ai`/impostor antes de REV
 
 - **Vigencia del token**: durante toda la vida de la sala (§3). Sin expiración por inactividad.
 - **Reconexión a mitad de partida**: el jugador con su token hace `GET /rooms/{room_code}/state` y vuelve a leer la instantánea actual (ronda, mensajes, recuento de votos). No hay handshake especial.
-- **Desconexión de un humano**: NO bloquea la partida; la ronda continúa. Si la ventana de RONDA expira sin su mensaje, el temporizador del servidor dispara `check_expiration()` → `round_timeout` → REVELACION (auto-avance, §13).
+- **Desconexión de un humano**: NO bloquea la partida; la fase continúa. Si la ventana de RONDA expira sin su mensaje, el temporizador del servidor dispara `check_expiration()` → `round_timeout` (o `quorum_lost` sin el mínimo de respondentes) → REVELACION (auto-avance, §12). En VOTACION v1.1, si expira la ventana, el servidor registra como abstención forzada (voto `null`) a los humanos ausentes y cierra según el quórum de presentes: con el mínimo → REVELACION válida; sin él → `quorum_lost` (§12).
 - **Sin "marcar y continuar"** (mark-and-continue): requeriría cambio de dominio; diferido salvo que R3 lo exija.
 - **Reunirse tras el cierre**: el estado final (REVELACION) sigue consultable mientras el proceso viva (§4); el token sigue siendo válido para leerlo.
 
@@ -361,8 +363,11 @@ La UI **debe** tratarlas como secretas: no dibujar `is_ai`/impostor antes de REV
 ## 12. Temporizadores y avance automático
 
 - **Propietario del temporizador: el servidor.** Un temporizador del propio servidor llama a `check_expiration()` de forma periódica, **incluso con cero consultas de clientes**; la expiración no depende de que la UI haga polling.
-- **RONDA** es el único estado con ventana (20 s por defecto, `remaining_seconds` visible en la instantánea). Al expirar sin completarse: `check_expiration()` → interrupción `round_timeout` → REVELACION automática.
-- **VOTACION no tiene plazo** (ADR-003 pendiente): espera a que **todos los humanos** voten; el último voto humano dispara el revelado automático en el dominio.
+- **Ventanas por fase (v1.1)**: `RONDA`, `DISCUSION` y `VOTACION` tienen ventana propia (20 s por defecto; configurables con `--round-timeout`); `LOBBY` y `REVELACION` no tienen ventana y su `remaining_seconds` es `null` (§7.1). La ventana visible en la instantánea es la de la fase vigente.
+- **RONDA**: al expirar sin completarse: `check_expiration()` → si respondieron al menos 2 humanos, interrupción `round_timeout`; si no, `quorum_lost`. Ambas → REVELACION automática.
+- **DISCUSION**: al expirar sin `open_voting`, avanza automáticamente a VOTACION con una ventana nueva.
+- **VOTACION (v1.1)**: ya no espera indefinidamente (ADR-003 resuelto). Al vencer su ventana, los humanos ausentes quedan registrados como abstención forzada (voto `null` en `result().votes`) y la partida cierra por quórum de presentes (voto o abstención explícita): con al menos 2 → REVELACION **válida** (`valid_game` true, `interruption_reason` null); sin ellos → interrupción `quorum_lost` → inválida. El último voto humano sigue disparando el revelado automático en el dominio antes de la expiración.
+- **Vencimiento con partida válida**: un cierre de VOTACION por ventana con quórum es una partida válida con la misma superficie que una votación completa (`valid_game` true, `interruption_reason` null); la v1.1 no añade un código distinto — la UI no necesita distinguirlos para presentar el final, y los ausentes son visibles como votos `null` en `result().votes`.
 - **Auto-revelado anunciado en la instantánea**: tras la expiración o el último voto, el siguiente `GET /state` devuelve REVELACION con `result` embebido; no hay evento push.
 - **Serialización**: todas las mutaciones sobre la partida pasan por un **bloqueo de escritor único** en el servidor (el dominio permanece sin bloqueos); esto garantiza que el revelado por último voto **nunca se dispara dos veces**.
 
@@ -370,7 +375,7 @@ La UI **debe** tratarlas como secretas: no dibujar `is_ai`/impostor antes de REV
 
 ## 13. Camino de actualización (aditivo)
 
-HTTP+JSON es el transporte canónico de R2 y **no se retirará**. Mejoras futuras son **aditivas** y nunca rompen el contrato v1.0:
+HTTP+JSON es el transporte canónico de R2 y **no se retirará**. Mejoras futuras son **aditivas** y nunca rompen el contrato v1.0 ni la v1.1:
 
 - **WebSocket (futuro)**: un endpoint adicional (p. ej. `/rooms/{room_code}/ws`) empujando las mismas formas JSON de §7 y usando el mismo token de sesión; HTTP+JSON permanece.
 - **gRPC (futuro)**: un servicio nuevo (proto nuevo) con los mismos valores de cable y semántica; requiere grpc-web/proxy para navegadores; HTTP+JSON permanece.
@@ -406,4 +411,5 @@ Estos cuatro puntos **no se resuelven en este contrato**; quedan asignados al ro
 | Versión | Fecha | Cambio |
 |---|---|---|
 | 1.0 | 2026-09-16 | Congelación inicial para R2 (R2-1 / A9). |
+| 1.1 | 2026-09-17 | Abstención explícita por sentinel `"__abstain__"` en `/votes` (§6.6); ventanas por fase para DISCUSION/VOTACION con cierre por quórum (§12); `remaining_seconds` por fase y votos `null` en `result()`. Cambios aditivos: los clientes v1.0 siguen siendo válidos. |
 | 1.1 | 2026-09-18 | Clave aditiva prompt_version en result() para transparencia del prompt del impostor (R3-2) |

@@ -16,14 +16,23 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import grpc
 
 from proto import impostor_pb2 as pb
 from proto import impostor_pb2_grpc as rpc
 from src.orchestrator.engine_client import EngineClient, apply_ai_turn
-from src.orchestrator.game import Game, GameState, RuleViolation, normalize_text
+from src.orchestrator.game import (
+    ABSTAIN_SENTINEL,
+    EventSink,
+    Game,
+    GameState,
+    RuleViolation,
+    normalize_text,
+)
 from src.orchestrator.session import IssuedIdentity, Room, SessionStore
+from src.orchestrator.storage import append_game_event
 from src.orchestrator.tracking import EngineUsage, RunParams, log_game_run
 
 logger = logging.getLogger(__name__)
@@ -147,10 +156,17 @@ def classify_submit(game: Game, alias: str, text: str) -> str:
 
 
 def classify_vote(game: Game, voter_alias: str, suspect_alias: str) -> str:
-    """Clasificar un RuleViolation de cast_vote con el estado vigente."""
+    """Clasificar un RuleViolation de cast_vote con el estado vigente.
+
+    El sentinel de abstención no es un jugador, así que se considera primero:
+    fuera de VOTACION manda ``wrong_state``; ya dentro, un segundo intento de
+    abstención es ``duplicate_vote`` y nunca cae en ``not_a_player``.
+    """
     snapshot = game.public_state()
     if snapshot["state"] != "VOTACION":
         return "wrong_state"
+    if suspect_alias == ABSTAIN_SENTINEL:
+        return "duplicate_vote"
     if suspect_alias not in snapshot["players"]:
         return "not_a_player"
     if voter_alias == suspect_alias:
@@ -186,8 +202,9 @@ class GameServer(ThreadingHTTPServer):
         clock: Callable[[], float] = time.monotonic,
         game_factory: Callable[[], Game] | None = None,
         timer_tick: float = 0.5,
+        event_sink_factory: Callable[[str], EventSink] | None = None,
     ) -> None:
-        """Guardar sesiones, motor, prompts/ajustes, fábrica de partidas y timer."""
+        """Guardar sesiones, motor, prompts/ajustes, fábrica de partidas y eventos."""
         super().__init__(addr, ApiHandler)
         self.store = store
         self.client = client
@@ -196,6 +213,7 @@ class GameServer(ThreadingHTTPServer):
         self._clock = clock
         self._game_factory = game_factory or (lambda: Game(clock=clock))
         self._timer_tick = timer_tick
+        self._event_sink_factory = event_sink_factory
         self._token_rooms: dict[str, Room] = {}
         self._known_rooms: dict[str, Room] = {}
         self._timer_stop: threading.Event | None = None
@@ -216,6 +234,14 @@ class GameServer(ThreadingHTTPServer):
         room = self.store.room(identity.room_code)
         self._token_rooms[identity.session_token] = room
         self._known_rooms[room.code] = room
+
+    def _attach_event_sink(self, room_code: str) -> None:
+        """Ligar el sumidero de la sala al evento del dominio, si hay fábrica."""
+        if self._event_sink_factory is None:
+            return
+        room = self.store.room(room_code)
+        assert room is not None
+        room.game.event_sink = self._event_sink_factory(room_code)
 
     def start_timer(self) -> None:
         """Arrancar el hilo que expira las rondas vencidas del servidor."""
@@ -330,6 +356,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _handle_create(self, _code: str | None) -> None:
         """Fundar una sala y emitir la identidad del anfitrión."""
         identity = self.server.store.create(game=self.server.new_game())
+        self.server._attach_event_sink(identity.room_code)
         self.server.record_token(identity)
         self._send_json(201, self._identity_body(identity))
 
@@ -342,6 +369,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             identity = self.server.store.join(code, game=room.game)
         except RuleViolation as error:
             raise _HttpError("wrong_state", str(error)) from error
+        self.server._attach_event_sink(identity.room_code)
         self.server.record_token(identity)
         self._send_json(201, self._identity_body(identity))
 
@@ -393,12 +421,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_204()
 
     def _handle_votes(self, code: str) -> None:
-        """Registrar el voto del humano ligado al token."""
+        """Registrar el voto del humano ligado al token (sentinel → abstención)."""
         room, alias = self._resolve_player(code)
         suspect = self._read_suspect_body()
         with room.lock:
             try:
-                room.game.cast_vote(alias, suspect)
+                room.game.cast_vote(
+                    alias, None if suspect == ABSTAIN_SENTINEL else suspect
+                )
             except RuleViolation as error:
                 raise _HttpError(
                     classify_vote(room.game, alias, suspect), str(error)
@@ -577,6 +607,11 @@ def _parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
         default=20.0,
         help="Ventana de cada ronda en segundos.",
     )
+    parser.add_argument(
+        "--events-db",
+        default=os.environ.get("SOSPECHAI_EVENTS_DB") or None,
+        help="Ruta sqlite donde anexar los eventos de ciclo de vida.",
+    )
     return parser.parse_args(arguments)
 
 
@@ -594,12 +629,23 @@ def _run_server(options: argparse.Namespace) -> None:
             round_timeout=options.round_timeout,
         )
 
+    event_sink_factory = None
+    if options.events_db is not None:
+        events_path = Path(options.events_db)
+
+        def event_sink_factory(code: str) -> EventSink:
+            """Construir el sumidero que anexa los eventos de la sala a sqlite."""
+            return lambda event_type, payload: append_game_event(
+                events_path, code, event_type, payload
+            )
+
     server = GameServer(
         (options.host, options.port),
         SessionStore(),
         EngineClient(rpc.ImpostorEngineStub(channel)),
         config=config,
         game_factory=factory,
+        event_sink_factory=event_sink_factory,
     )
     server.start_timer()
     try:

@@ -18,17 +18,28 @@ def render(ctx: ScreenContext) -> None:
         st.write("La partida aún no ha cargado. Esperando la primera instantánea…")
         return
     max_words = ctx.snapshot.max_words
+
+    def _send() -> None:
+        """Enviar el borrador y limpiarlo solo si el servidor lo aceptó."""
+        draft = st.session_state.get("draft", "")
+        if ctx.on_submit_message is None:
+            return
+        ctx.on_submit_message(draft)
+        if st.session_state.get("notice") is None:
+            st.session_state["draft"] = ""
+
     draft = st.text_input("Tu mensaje", key="draft")
     words = count_words(draft)
     allowed = within_limit(words, max_words)
     st.caption(f"{words} / {max_words} palabras")
     if not allowed:
         st.error(f"El mensaje supera el límite de {max_words} palabras.")
-    send_clicked = st.button("Enviar", key="send_message", disabled=not allowed)
-    if send_clicked and allowed and ctx.on_submit_message is not None:
-        ctx.on_submit_message(draft)
-        if st.session_state.get("notice") is None:
-            st.session_state["draft"] = ""
+    st.button(
+        "Enviar",
+        key="send_message",
+        disabled=not allowed,
+        on_click=_send,
+    )
     _render_messages(ctx)
     notice = st.session_state.get("notice") or ctx.notice
     if notice:

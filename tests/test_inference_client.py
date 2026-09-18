@@ -342,3 +342,32 @@ def test_estimate_cost_usd() -> None:
     assert estimate_cost_usd(prompt_tokens=42, completion_tokens=17) == pytest.approx(
         expected
     )
+
+
+def test_estimate_cost_usd_bills_cached_tokens_once() -> None:
+    """Los cacheados se cobran a su tarifa y no dos veces a tarifa de prompt."""
+    # Arrange
+    prompt, completion, cached = 900_000, 50_000, 100_000
+    # Act
+    result = estimate_cost_usd(
+        prompt_tokens=prompt, completion_tokens=completion, cached_tokens=cached
+    )
+    # Assert
+    expected = (prompt - cached) * 0.00017 / 1000.0 + completion * 0.0002 / 1000.0
+    expected += cached * 0.000136 / 1000.0
+    assert result == pytest.approx(expected)
+    double_charge = (prompt + cached) * 0.00017 / 1000.0 + completion * 0.0002 / 1000.0
+    assert result < double_charge
+
+
+def test_estimate_cost_usd_cached_tokens_default_to_zero() -> None:
+    """Sin cached_tokens el prompt completo se factura a su tarifa."""
+    # Arrange
+    prompt, completion = 500_000, 200_000
+    # Act
+    explicit = estimate_cost_usd(
+        prompt_tokens=prompt, completion_tokens=completion, cached_tokens=0
+    )
+    defaulted = estimate_cost_usd(prompt_tokens=prompt, completion_tokens=completion)
+    # Assert
+    assert defaulted == explicit

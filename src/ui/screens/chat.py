@@ -1,15 +1,42 @@
-"""Sala de chat de la ronda: mensajes con alias y contador de palabras.
+"""Sala de chat de la ronda: mensajes, contador en vivo y bloqueo local (UIF-04/05).
 
-El contenido definitivo (mensajes, campo de entrada y bloqueo por `max_words`)
-se completa en la fase 3; aquí solo se presenta el placeholder navegable.
+La conversación mostrada es siempre `ctx.snapshot.messages`; la UI nunca agrega
+mensajes localmente (UIF-05). El bloqueo deshabilita el envío sobre `max_words`;
+la autoridad del límite sigue siendo el orquestador.
 """
 
 import streamlit as st
 
 from src.ui.screens.context import ScreenContext
+from src.ui.words import count_words, within_limit
 
 
 def render(ctx: ScreenContext) -> None:
-    """Renderizar el placeholder de la sala de chat (UIF-04)."""
+    """Renderizar el chat con contador en vivo y bloqueo sobre `max_words`."""
     st.title("Sala de chat")
-    st.write("Placeholder del esqueleto: los mensajes llegan con la fase 2.")
+    if ctx.snapshot is None:
+        st.write("La partida aún no ha cargado. Esperando la primera instantánea…")
+        return
+    max_words = ctx.snapshot.max_words
+    draft = st.text_input("Tu mensaje", key="draft")
+    words = count_words(draft)
+    allowed = within_limit(words, max_words)
+    st.caption(f"{words} / {max_words} palabras")
+    if not allowed:
+        st.error(f"El mensaje supera el límite de {max_words} palabras.")
+    send_clicked = st.button("Enviar", key="send_message", disabled=not allowed)
+    if send_clicked and allowed and ctx.on_submit_message is not None:
+        ctx.on_submit_message(draft)
+        if st.session_state.get("notice") is None:
+            st.session_state["draft"] = ""
+    _render_messages(ctx)
+    notice = st.session_state.get("notice") or ctx.notice
+    if notice:
+        st.warning(notice)
+
+
+def _render_messages(ctx: ScreenContext) -> None:
+    """Listar los mensajes por alias desde la última instantánea del orquestador."""
+    st.write(f"Ronda {ctx.snapshot.round_number}")
+    for message in ctx.snapshot.messages:
+        st.write(f"**{message.alias}**: {message.text}")

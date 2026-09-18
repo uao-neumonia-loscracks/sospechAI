@@ -29,7 +29,11 @@ class ChatMessage:
 
 @dataclass(frozen=True)
 class StateSnapshot:
-    """Espejo de public_state() (contrato §7.1); en REVELACION incluye `result`."""
+    """Espejo de public_state() (contrato §7.1); en REVELACION incluye `result`.
+
+    `round_prompt` es la pregunta/tema de la ronda vigente: string a partir de
+    `round_number >= 1` (RONDA/DISCUSION/VOTACION/REVELACION) y None en LOBBY.
+    """
 
     state: str
     round_number: int | None
@@ -40,6 +44,7 @@ class StateSnapshot:
     votes_received: int
     remaining_seconds: float | None
     result: dict | None
+    round_prompt: str | None = None
 
     @classmethod
     def from_mapping(cls, raw: dict) -> "StateSnapshot":
@@ -48,6 +53,7 @@ class StateSnapshot:
         return cls(
             state=raw["state"],
             round_number=raw.get("round_number"),
+            round_prompt=raw.get("round_prompt"),
             rounds=raw["rounds"],
             max_words=raw["max_words"],
             players=list(raw["players"]),

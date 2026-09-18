@@ -25,6 +25,7 @@ from proto import impostor_pb2_grpc as rpc
 from src.orchestrator.engine_client import EngineClient, apply_ai_turn
 from src.orchestrator.game import (
     ABSTAIN_SENTINEL,
+    DEFAULT_PROMPTS,
     EventSink,
     Game,
     GameState,
@@ -76,11 +77,6 @@ TRANSPORT_MESSAGES = {
     "method_not_allowed": "Método no permitido para esta ruta.",
     "internal": "Error interno del servidor.",
 }
-
-DEFAULT_PROMPTS = (
-    "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
-    "¿Qué comida escogerías después de una clase larga?",
-)
 
 
 @dataclass(frozen=True)
@@ -627,6 +623,7 @@ def _run_server(options: argparse.Namespace) -> None:
             rounds=options.rounds,
             max_words=options.max_words,
             round_timeout=options.round_timeout,
+            prompts=DEFAULT_PROMPTS,
         )
 
     event_sink_factory = None

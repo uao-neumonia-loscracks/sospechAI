@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.orchestrator.game import Game, GameState, RuleViolation
+from src.orchestrator.game import DEFAULT_PROMPTS, Game, GameState, RuleViolation
 from src.orchestrator.storage import save_practice_game
 
 
@@ -264,6 +264,55 @@ def test_public_snapshot_cannot_mutate_the_game() -> None:
     view["messages"].append({"text": "Mensaje inventado"})
     assert len(game.public_state()["players"]) == 4
     assert game.public_state()["messages"] == []
+
+
+def test_round_prompt_is_none_before_start() -> None:
+    """En LOBBY no hay pregunta de ronda vigente (round_number 0)."""
+    # Arrange
+    game = Game()
+
+    # Act
+    view = game.public_state()
+
+    # Assert
+    assert view["round_number"] == 0
+    assert view["round_prompt"] is None
+
+
+def test_round_prompt_exposes_current_round_question() -> None:
+    """Cada ronda publica su pregunta vigente para los humanos."""
+    # Arrange
+    game, aliases = make_game(rounds=2)
+
+    # Act
+    game.start()
+    first = game.public_state()["round_prompt"]
+    for alias in aliases:
+        game.submit_message(alias, "Respuesta de prueba.")
+    second = game.public_state()["round_prompt"]
+
+    # Assert
+    assert first == DEFAULT_PROMPTS[0]
+    assert second == DEFAULT_PROMPTS[1]
+
+
+def test_custom_prompts_are_used_for_each_round() -> None:
+    """El constructor permite inyectar las preguntas de la partida."""
+    # Arrange
+    game = Game(rounds=2, prompts=("¿Pregunta A?", "¿Pregunta B?"))
+    aliases = [game.add_player() for _ in range(3)]
+    aliases.append(game.add_player(is_ai=True))
+
+    # Act
+    game.start()
+    first = game.public_state()["round_prompt"]
+    for alias in aliases:
+        game.submit_message(alias, "Respuesta de prueba.")
+    second = game.public_state()["round_prompt"]
+
+    # Assert
+    assert first == "¿Pregunta A?"
+    assert second == "¿Pregunta B?"
 
 
 def test_sqlite_round_trip_marks_the_session_as_simulated(tmp_path: Path) -> None:

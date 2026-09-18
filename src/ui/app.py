@@ -83,6 +83,12 @@ def _start_room(state: Any) -> None:
     _mutate(state, api.start)
 
 
+def _open_voting_room(state: Any) -> None:
+    """Abrir la votación (solo anfitrión)."""
+
+    _mutate(state, api.open_voting)
+
+
 def _submit_message(state: Any, text: str) -> None:
     """Enviar un mensaje de ronda y refrescar la conversación (UIF-05)."""
 
@@ -106,7 +112,6 @@ def _snapshot_sig(snapshot: Any) -> tuple[Any, ...] | None:
         tuple(snapshot.players),
         snapshot.messages,
         snapshot.votes_received,
-        snapshot.remaining_seconds,
     )
 
 
@@ -149,6 +154,7 @@ def main() -> None:
         on_create_room=lambda: _create_room(state),
         on_join_room=lambda room_code: _join_room(state, room_code),
         on_start_room=lambda: _start_room(state),
+        on_open_voting=lambda: _open_voting_room(state),
         on_submit_message=lambda text: _submit_message(state, text),
         on_submit_vote=lambda suspect: _submit_vote(state, suspect),
     )
@@ -169,7 +175,7 @@ def main() -> None:
                 return
             if _snapshot_sig(snapshot) != _snapshot_sig(state.get("snapshot")):
                 state["snapshot"] = snapshot
-                st.rerun(scope="app")
+                st.rerun()
 
         poll_snapshot()
 

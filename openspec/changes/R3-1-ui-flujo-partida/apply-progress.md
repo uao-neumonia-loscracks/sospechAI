@@ -92,3 +92,79 @@
 - Current work unit: PR 1 — esqueleto navegable
 - Boundary: empieza con `uv add streamlit` y termina con `src/ui/app.py` placeholder + smoke en verde
 - Estimated review budget impact: 9 ficheros nuevos en `src/ui/`, 1 test nuevo, `pyproject.toml` + `uv.lock`; `uv.lock` excluido del presupuesto de riesgo por ser generado
+
+---
+
+# Slice PR 2 — Contenido + FakeSospechAI (tareas 2.1–2.6, 2.9, 3.1–3.6)
+
+**Cambio**: `R3-1-ui-flujo-partida`
+**Slice**: PR 2 — contenido contra `api.py` con `FakeSospechAI` + contenido de pantallas y polling
+**Modo**: Strict TDD (`strict_tdd: true` + runner `uv run pytest`)
+**Fecha**: 2026-09-17
+**Rama**: `feature/r3-1-ui-flujo-partida-p2` (base `develop` @ 07ecadc, regla A3: ramas feature apuntan a develop)
+**Merge previo**: PR 1 mergeado a `main` vía #41; `develop` sincronizado con `main` (invariante main ⊆ develop en 07ecadc).
+
+## Tareas completadas
+
+- [x] 2.1 RED — Contador y límite (D5, UIF-04/11) — 2026-09-17
+- [x] 2.2 GREEN — Crear `src/ui/words.py` (D5) — 2026-09-17
+- [x] 2.3 RED — Formas y máquina del fake (UIF-07) — 2026-09-17
+- [x] 2.4 GREEN — `src/ui/sources/__init__.py` y `src/ui/sources/fake.py` (D3) — 2026-09-17
+- [x] 2.5 GREEN — Crear `src/ui/api.py` (D3, UIF-07/10) — 2026-09-17
+- [x] 2.6 RED — Bloqueo por límite combinado (UIF-04/05) — 2026-09-17
+- [x] 2.9 REFACTOR — Conteo sin duplicados (UIF-11, AGENTS) — 2026-09-17
+- [x] 3.1 Pantalla de consentimiento (D2, UIF-02) — 2026-09-17
+- [x] 3.2 Lobby (D2, UIF-03) — 2026-09-17
+- [x] 3.3 Sala de chat (D2, UIF-04/05) — 2026-09-17
+- [x] 3.4 Votación vacía y placeholder REVELACION (D2, UIF-08) — 2026-09-17
+- [x] 3.5 Polling no bloqueante con frecuencias por estado (D4, UIF-06) — 2026-09-17
+- [x] 3.6 IA anónima e idéntica (D6, UIF-03) — 2026-09-17
+
+## TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| 2.1 | `tests/test_ui_words.py` | Unit | N/A (new) | ✅ escrito → falla (módulo ausente) | ✅ 5 passed | ✅ vacío/acentos/espacios/límites | ✅ — |
+| 2.2 | `tests/test_ui_words.py` | Unit | N/A (new) | ✅ (2.1) | ✅ 5 passed | ✅ Idem 2.1 | ✅ `count_words`/`within_limit` separados |
+| 2.3 | `tests/test_ui_api.py` | Unit | N/A (new) | ✅ escrito → falla (fake ausente) | ✅ (en 2.4) | ✅ claves exactas + orden máquina + alias | ✅ máquina congelada |
+| 2.4 | `tests/test_ui_api.py` | Unit | N/A (new) | ✅ (2.3) | ✅ (en 2.6) | ✅ catálogo §8 | ✅ store compartido por módulo |
+| 2.5 | `tests/test_ui_api.py` | Unit | N/A (new) | ➖ estructural (smoke facade) | ✅ 41 passed total UI | ✅ frozen dataclasses | ✅ `_source()` selector |
+| 2.6 | `tests/test_ui_api.py` | Unit | N/A (new) | ✅ escrito → `too_many_words` no lanzado | ✅ 41 passed | ✅ 400 + mensaje ausente | ✅ ApiError por `code` |
+| 2.9 | — | Refactor | 🔧 suite completa | ➖ | ✅ 217 passed | ✅ grep `count_words` único | ✅ 0 duplicados |
+| 3.1–3.6 | `tests/test_ui_router.py` + `AppTest` | Smoke/Unit | suite | ➖ (reutilizan RED previos) | ✅ AppTest: 0 excepciones | ✅ happy path fake manual | ✅ — |
+
+### Test Summary
+
+- **Total tests UI**: 41 (words 5 + api 27 + router 9) — suite completa **217 passed**
+- **Layers used**: Unit, Smoke, Refactor (grep único)
+
+## Work Unit Evidence
+
+| Evidence | Required value |
+|---|---|
+| Focused test command | `uv run pytest tests/test_ui_words.py tests/test_ui_api.py tests/test_ui_router.py` → **41 passed in 1.28s** |
+| Full suite | `uv run pytest` → **217 passed in 4.14s**, cero warnings (`filterwarnings=error`) |
+| Runtime harness | `AppTest.from_file("src/ui/app.py").run()` → **0 exceptions, título "Consentimiento informado"**; happy path manual vía facade fake: create→join→start→RONDA (IA Jugador 3 último) → mensaje dentro del límite visible → sobre el límite `ApiError(too_many_words, 400)` y NO en conversación |
+| ruff / black | `uv run ruff check src/ui tests/test_ui_*.py` → All checks passed; `uv run black --check .` → **43 files would be left unchanged** (exit 0 — `.gitignore` ya UTF-8 tras fix de R1 en develop/main) |
+| git status | `M` tasks.md + screens/app.py/context.py; `??` api.py, words.py, sources/, test_ui_api.py, test_ui_words.py — **sin cambios en `src/orchestrator/` ni `src/impostor_engine/`** |
+| Rollback | Work Unit 2: eliminar `src/ui/api.py`, `src/ui/sources/`, `src/ui/words.py`, `tests/test_ui_words.py`, `tests/test_ui_api.py` y revertir screens/app.py a los stubs de PR 1; PR 1 intacto. |
+
+## Deviations from Design
+
+1. **Selector de anfitrión por `alias == "Jugador 1"`** en `lobby.py` (task 3.2): `RoomIdentity` del contrato no expone un flag `is_host`, así que el botón «Iniciar partida» se muestra al `Jugador 1`. Válido para el fake (alias por orden de inserción); si el orquestador HTTP futuro asigna aliases distinto, el PR 3 debe revisar esto.
+2. **`app.py` importa `from src.ui.screens import ScreenContext, render_*` dentro de `main()`** (imports locales) — heredado del bootstrap `sys.path` del PR 1 (evita E402). El resto coincide con el diseño (D2, D3, D4, D5, D6).
+
+## Issues Found
+
+1. **Ninguno bloqueante.** El ejecutor del slice fue cancelado por el usuario a mitad de la persistencia; el código ya estaba completo y verde. La verificación del orquestador (suite, ruff, black, AppTest, happy path fake) confirmó el estado antes de persistir. Nota: `st.fragment(run_every=...)` y `st.rerun(scope="app")` soportados en streamlit 1.64.0 (verificado en PR 1).
+
+## Remaining Tasks
+
+- [ ] 2.7, 2.8 (PR 3: `HttpSospechAI` + integración `-m integration`) — **no incluidas en este slice**
+- [ ] 4.1–4.4 (fase 4: verificación final de criterios de éxito, orquestador)
+
+## Workload / PR Boundary
+
+- Mode: stacked PR slice (`stacked-to-develop`, regla A3)
+- Current work unit: PR 2 — contenido + FakeSospechAI
+- Boundary: empieza con `words.py`/`api.py` RED y termina con pantallas completas + polling `st.fragment` + happy path fake en verde

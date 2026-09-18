@@ -17,8 +17,10 @@ from typing import Any
 
 import pytest
 
+from proto import impostor_pb2 as pb
+from src.orchestrator.engine_client import EngineClient
 from src.orchestrator.game import Game
-from src.orchestrator.server import GameServer, parse_route
+from src.orchestrator.server import GameServer, ServerConfig, parse_route
 from src.orchestrator.session import SessionStore
 
 SECRET_MARKERS = (
@@ -31,12 +33,23 @@ SECRET_MARKERS = (
 )
 
 
-class FakeStub:
-    """El motor no debe invocarse en esta fase: cualquier llamada es un fallo."""
+class Stub:
+    """Doble benigno del engine: responde una frase corta y cuenta llamadas."""
 
-    def GenerateUtterance(self, request: Any, *, timeout: float) -> Any:
-        """Fallar si el servidor toca el engine antes de la fase 3."""
-        raise AssertionError("El servidor no debe invocar al motor en la fase 2.")
+    id = "test-model"
+
+    def __init__(self) -> None:
+        """Comenzar sin llamadas registradas."""
+        self.calls = 0
+
+    def GenerateUtterance(self, request: Any, *, timeout: float) -> Iterator:
+        """Devolver un stream local válido para el turno del impostor."""
+        self.calls += 1
+        yield pb.UtteranceChunk(text_delta="Un café.")
+        yield pb.UtteranceChunk(is_final=True)
+
+
+MODEL_ID = "test/model:provider"
 
 
 @dataclass
@@ -109,7 +122,12 @@ def serve(
     store = store or SessionStore()
     factory = game_factory or (lambda: Game(rounds=1, round_timeout=None, clock=clock))
     server = GameServer(
-        ("127.0.0.1", 0), store, client or FakeStub(), game_factory=factory, clock=clock
+        ("127.0.0.1", 0),
+        store,
+        client or EngineClient(Stub()),
+        config=ServerConfig(model_id=MODEL_ID),
+        game_factory=factory,
+        clock=clock,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -167,21 +185,16 @@ def assert_secrets_absent(headers: dict[str, str], raw: bytes) -> None:
         assert marker.decode() not in joined
 
 
-def _reach_discusion(
-    api: Api, store: SessionStore, code: str, host: str, token2: str
-) -> None:
-    """Completar la única ronda por dominio (la fase 2 no expone el motor)."""
+def _reach_discusion(api: Api, code: str, host: str, token2: str) -> None:
+    """Completar la única ronda: humanos por HTTP y turno de IA del servidor."""
     assert submit(api, code, host, "primera respuesta")[0] == 204
     assert submit(api, code, token2, "segunda respuesta")[0] == 204
-    store.room(code).game.submit_message("Jugador 3", "respuesta del impostor")
     assert state(api, code, host)["state"] == "DISCUSION"
 
 
-def _reach_votacion(
-    api: Api, store: SessionStore, code: str, host: str, token2: str
-) -> None:
-    """Alcanzar VOTACION por el dominio, sin voto anticipado."""
-    _reach_discusion(api, store, code, host, token2)
+def _reach_votacion(api: Api, code: str, host: str, token2: str) -> None:
+    """Alcanzar VOTACION abriendo la votación tras la discusión."""
+    _reach_discusion(api, code, host, token2)
     assert api.send("POST", f"/rooms/{code}/voting/open", token=host)[0] == 204
     assert state(api, code, host)["state"] == "VOTACION"
 
@@ -278,7 +291,6 @@ def test_mutations_return_204_without_content_type() -> None:
         assert_204(api.send("POST", f"/rooms/{code}/start", token=host))
         assert_204(submit(api, code, host, "hola"))
         assert_204(submit(api, code, token2, "mundo"))
-        store.room(code).game.submit_message("Jugador 3", "respuesta del impostor")
         assert_204(api.send("POST", f"/rooms/{code}/voting/open", token=host))
         assert_204(
             api.send(
@@ -410,7 +422,6 @@ def test_server_adds_one_ai_and_no_client_path_adds_another() -> None:
         assert snapshot["players"] == ["Jugador 1", "Jugador 2", "Jugador 3"]
         assert submit(api, code, host, "hola")[0] == 204
         assert submit(api, code, token2, "mundo")[0] == 204
-        store.room(code).game.submit_message("Jugador 3", "respuesta")
         assert api.send("POST", f"/rooms/{code}/voting/open", token=host)[0] == 204
         api.send(
             "POST", f"/rooms/{code}/votes", payload={"suspect": "Jugador 3"}, token=host
@@ -447,7 +458,6 @@ def test_full_lifecycle_frozen_wire_values_and_result() -> None:
         assert "result" not in snapshot
         assert submit(api, code, host, "sospecho del tres")[0] == 204
         assert submit(api, code, token2, "yo tambien")[0] == 204
-        store.room(code).game.submit_message("Jugador 3", "respuesta del impostor")
         snapshot = state(api, code, host)
         assert snapshot["state"] == "DISCUSION"
         assert "result" not in snapshot
@@ -513,7 +523,6 @@ def test_privacy_probing_leaks_nothing_before_revelacion() -> None:
         assert_secrets_absent(headers, raw)
         assert submit(api, code, host, "hola")[0] == 204
         assert submit(api, code, token2, "mundo")[0] == 204
-        store.room(code).game.submit_message("Jugador 3", "respuesta del impostor")
         assert api.send("POST", f"/rooms/{code}/voting/open", token=host)[0] == 204
         assert (
             api.send(
@@ -549,7 +558,7 @@ def test_delivered_snapshot_is_immutable_to_later_mutations() -> None:
         before = json.loads(raw_before)
         after = json.loads(raw_after)
         assert len(before["messages"]) == 1
-        assert len(after["messages"]) == 2
+        assert len(after["messages"]) == 3  # humanos + turno de IA
         assert raw_before != raw_after
 
 
@@ -565,8 +574,8 @@ def test_rejoin_mid_round_reads_current_snapshot() -> None:
         assert len(first["messages"]) == 1
         submit(api, code, token2, "mundo")
         second = state(api, code, host)
-        assert second["state"] == "RONDA"
-        assert len(second["messages"]) == 2
+        assert second["state"] == "DISCUSION"  # el turno de IA cierra la ronda
+        assert len(second["messages"]) == 3
         assert first["messages"] != second["messages"]
 
 
@@ -618,7 +627,7 @@ def catalog_self_vote(api: Api, store: SessionStore) -> tuple[int, str, str]:
     """Voto a uno mismo → 400 self_vote."""
     code, host, token2 = _catalog_room(api)
     _catalog_game(api, code, host)
-    _reach_votacion(api, store, code, host, token2)
+    _reach_votacion(api, code, host, token2)
     status, _, body = api.send(
         "POST", f"/rooms/{code}/votes", payload={"suspect": "Jugador 1"}, token=host
     )
@@ -629,7 +638,7 @@ def catalog_duplicate_vote(api: Api, store: SessionStore) -> tuple[int, str, str
     """Segundo voto del mismo humano → 409 duplicate_vote."""
     code, host, token2 = _catalog_room(api)
     _catalog_game(api, code, host)
-    _reach_votacion(api, store, code, host, token2)
+    _reach_votacion(api, code, host, token2)
     assert (
         api.send(
             "POST", f"/rooms/{code}/votes", payload={"suspect": "Jugador 2"}, token=host
@@ -646,7 +655,7 @@ def catalog_not_a_player_suspect(api: Api, store: SessionStore) -> tuple[int, st
     """Suspect fuera de la partida → 403 not_a_player."""
     code, host, token2 = _catalog_room(api)
     _catalog_game(api, code, host)
-    _reach_votacion(api, store, code, host, token2)
+    _reach_votacion(api, code, host, token2)
     status, _, body = api.send(
         "POST",
         f"/rooms/{code}/votes",
@@ -692,7 +701,7 @@ def catalog_wrong_state_votes(api: Api, store: SessionStore) -> tuple[int, str, 
     """Voto fuera de VOTACION → 409 wrong_state."""
     code, host, token2 = _catalog_room(api)
     _catalog_game(api, code, host)
-    _reach_discusion(api, store, code, host, token2)
+    _reach_discusion(api, code, host, token2)
     status, _, body = api.send(
         "POST", f"/rooms/{code}/votes", payload={"suspect": "Jugador 3"}, token=host
     )

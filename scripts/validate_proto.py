@@ -1,4 +1,4 @@
-"""Comprobar sintaxis del borrador de Protocol Buffers, sin iniciar servidores."""
+"""Validar la sintaxis del contrato congelado de Protocol Buffers."""
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,7 +21,7 @@ def main() -> int:
         )
     if status == 0:
         print(
-            "El borrador .proto compila. Sigue pendiente la revisión conjunta de R1 y R2."
+            "El contrato .proto v1 compila (CONGELADO: no modificar sin ADR aprobado)."
         )
     return status
 

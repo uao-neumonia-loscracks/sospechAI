@@ -45,3 +45,8 @@ def poll_interval_seconds(state: str | None) -> float:
     if state in GAME_STATES:
         return GAME_POLL_SECONDS
     return IDLE_POLL_SECONDS
+
+
+def mostrar_open_voting(state: str | None, alias: str) -> bool:
+    """True solo para el anfitrión en DISCUSION (UIV-01)."""
+    return state == "DISCUSION" and alias == "Jugador 1"

@@ -7,6 +7,7 @@ la autoridad del límite sigue siendo el orquestador.
 
 import streamlit as st
 
+from src.ui.router import mostrar_open_voting
 from src.ui.screens.context import ScreenContext
 from src.ui.words import count_words, within_limit
 
@@ -41,6 +42,7 @@ def render(ctx: ScreenContext) -> None:
         on_click=_send,
     )
     _render_messages(ctx)
+    _render_open_voting(ctx)
     notice = st.session_state.get("notice") or ctx.notice
     if notice:
         st.warning(notice)
@@ -56,3 +58,17 @@ def _render_messages(ctx: ScreenContext) -> None:
         st.subheader(ctx.snapshot.round_prompt)
     for message in ctx.snapshot.messages:
         st.write(f"**{message.alias}**: {message.text}")
+
+
+def _render_open_voting(ctx: ScreenContext) -> None:
+    """Mostrar el botón de apertura de votación solo para el anfitrión (UIV-01)."""
+
+    def _open_voting() -> None:
+        """Abrir la votación; el ciclo del evento re-renderiza (D8)."""
+        if ctx.on_open_voting is None:
+            return
+        ctx.on_open_voting()
+
+    alias = ctx.room_identity.alias if ctx.room_identity is not None else ""
+    if mostrar_open_voting(ctx.snapshot.state, alias):
+        st.button("Abrir votación", key="open_voting", on_click=_open_voting)

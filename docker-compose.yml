@@ -45,6 +45,7 @@ services:
       context: .
       dockerfile: Dockerfile.orchestrator
     container_name: impostor-orchestrator
+    command: uv run --no-sync python -m src.orchestrator.server --round-timeout 60
     depends_on:
       impostor-engine:
         condition: service_healthy

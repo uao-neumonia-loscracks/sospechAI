@@ -22,9 +22,15 @@ class HttpSospechAI:
     """Fuente ``SospechAI`` que habla HTTP+JSON con el orquestador (contrato §§6-8)."""
 
     def __init__(self, base_url: str) -> None:
-        """Fijar la base URL del orquestador sin la barra final."""
+        """Fijar la base URL del orquestador sin la barra final.
+
+        El timeout cubre el turno síncrono de la IA dentro de POST /messages
+        (el orquestador responde recién tras publicar la réplica del impostor,
+        hasta ~8s más la latencia del router; ver `_run_ai_turn` en server.py).
+        Un timeout menor cortaba el envío y mostraba "error de red" en la UI.
+        """
         self.base_url = base_url.rstrip("/")
-        self._timeout = 5.0
+        self._timeout = 30.0
 
     def create_room(self) -> RoomIdentity:
         """POST /rooms: crear la sala y unirse como anfitrión (201, contrato §6.1)."""

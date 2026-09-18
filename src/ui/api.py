@@ -115,9 +115,21 @@ def submit_message(room_code: str, session_token: str, text: str) -> None:
 
 
 def _source() -> SospechAI:
-    """Seleccionar la fuente por `SOSPECHAI_UI_SOURCE` (swap localizado, UIF-07)."""
-    from src.ui.sources import FakeSospechAI
+    """Seleccionar la fuente por `SOSPECHAI_UI_SOURCE` (swap localizado, UIF-07).
 
-    if environ.get("SOSPECHAI_UI_SOURCE", "fake") == "fake":
+    "fake" (por defecto) -> FakeSospechAI in-memory; "http" -> HttpSospechAI con
+    base URL en `SOSPECHAI_ORCHESTRATOR_URL`. Las pantallas no cambian (UIF-07).
+    """
+    from src.ui.sources import FakeSospechAI, HttpSospechAI
+
+    source = environ.get("SOSPECHAI_UI_SOURCE", "fake")
+    if source == "fake":
         return FakeSospechAI()
-    raise ApiError("internal", 500, "La fuente 'http' aún no está disponible en R3-1.")
+    if source == "http":
+        base_url = environ.get("SOSPECHAI_ORCHESTRATOR_URL")
+        if not base_url:
+            raise ApiError(
+                "internal", 500, "Falta SOSPECHAI_ORCHESTRATOR_URL con la fuente http."
+            )
+        return HttpSospechAI(base_url=base_url)
+    raise ApiError("internal", 500, f"Fuente desconocida: {source!r}.")

@@ -210,7 +210,7 @@ def test_timer_fires_with_zero_client_queries() -> None:
         )
         snapshot = state(api, code, host)
         assert snapshot["state"] == "REVELACION"
-        assert snapshot["result"]["interruption_reason"] == "round_timeout"
+        assert snapshot["result"]["interruption_reason"] == "quorum_lost"
         assert snapshot["result"]["valid_game"] is False
         assert snapshot["result"]["transcript"] == []
 

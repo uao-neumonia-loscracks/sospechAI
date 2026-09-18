@@ -29,6 +29,12 @@ class GameState(StrEnum):
     REVEAL = "REVELACION"
 
 
+# Fases con ventana temporal propia y mínimo de humanos presentes para no
+# cerrar la partida como inválida al vencer la ventana.
+TIMED_STATES = {GameState.ROUND, GameState.DISCUSSION, GameState.VOTING}
+QUORUM_MIN_HUMANS = 2
+
+
 class RuleViolation(ValueError):
     """Una acción del jugador no cumple las reglas o la etapa actual."""
 
@@ -82,15 +88,56 @@ class Game:
         self._interruption_reason: str | None = None
 
     def remaining_time(self) -> float | None:
-        """Consultar el presupuesto de la ronda, usando un reloj monotónico."""
-        if self.state != GameState.ROUND or self._deadline is None:
+        """Consultar el presupuesto de la fase temporal actual, si tiene ventana."""
+        if self.state not in TIMED_STATES or self._deadline is None:
             return None
         return max(0.0, self._deadline - self._clock())
 
+    def _set_deadline(self) -> None:
+        """Fijar la ventana de la fase temporal desde el reloj compartido."""
+        self._deadline = (
+            self._clock() + self.round_timeout
+            if self.round_timeout is not None
+            else None
+        )
+
     def check_expiration(self) -> None:
-        """Cerrar una ronda vencida; el servicio debe invocarlo también con un timer."""
-        if self.remaining_time() == 0:
-            self.interrupt("round_timeout")
+        """Aplicar el vencimiento de la fase actual; el servicio también lo invoca."""
+        if self.remaining_time() != 0:
+            return
+        if self.state == GameState.ROUND:
+            if self._submitted_humans() < QUORUM_MIN_HUMANS:
+                self.interrupt("quorum_lost")
+            else:
+                self.interrupt("round_timeout")
+        elif self.state == GameState.DISCUSSION:
+            self.state = GameState.VOTING
+            self._set_deadline()
+        elif self.state == GameState.VOTING:
+            for alias, player in self._players.items():
+                if not player.is_ai and alias not in self._votes:
+                    self._votes[alias] = None
+            if self._present_humans() < QUORUM_MIN_HUMANS:
+                self.interrupt("quorum_lost")
+            else:
+                self._complete_reveal()
+
+    def _submitted_humans(self) -> int:
+        """Contar humanos distintos que ya respondieron en la ronda actual."""
+        submitted = {
+            message.alias
+            for message in self._messages
+            if message.round_number == self.round_number
+            and not self._players[message.alias].is_ai
+        }
+        return len(submitted)
+
+    def _present_humans(self) -> int:
+        """Contar humanos que votaron o se abstuvieron explícitamente."""
+        present = {
+            alias for alias, vote in self._votes.items() if vote is not None
+        } | set(self._explicit_abstentions)
+        return len(present)
 
     def interrupt(self, reason: str) -> None:
         """Revelar tras un fallo técnico y excluir la partida del cálculo de detección."""
@@ -103,6 +150,7 @@ class Game:
             "engine_protocol",
             "engine_rejected",
             "invalid_engine_response",
+            "quorum_lost",
         }
         if reason not in allowed:
             raise ValueError(
@@ -156,11 +204,7 @@ class Game:
             )
         self.round_number = 1
         self.state = GameState.ROUND
-        self._deadline = (
-            self._clock() + self.round_timeout
-            if self.round_timeout is not None
-            else None
-        )
+        self._set_deadline()
 
     def submit_message(
         self, alias: str, text: str, *, expected_round: int | None = None
@@ -189,19 +233,18 @@ class Game:
         if len(current) + 1 == len(self._players):
             if self.round_number < self.rounds:
                 self.round_number += 1
-                self._deadline = (
-                    self._clock() + self.round_timeout
-                    if self.round_timeout is not None
-                    else None
-                )
+                self._set_deadline()
             else:
                 self.state = GameState.DISCUSSION
+                self._set_deadline()
         return normalized
 
     def open_voting(self) -> None:
         """Abrir la votación después de completar todas las rondas."""
+        self.check_expiration()
         self._require_state(GameState.DISCUSSION)
         self.state = GameState.VOTING
+        self._set_deadline()
 
     def cast_vote(self, voter_alias: str, suspect_alias: str | None) -> None:
         """Aceptar un voto o una abstención y revelar al completarse la votación.
@@ -209,6 +252,7 @@ class Game:
         Un `suspect_alias` nulo registra una abstención explícita: cuenta como
         acción para cerrar la votación, pero no es un voto escrutable.
         """
+        self.check_expiration()
         self._require_state(GameState.VOTING)
         voter = self._player(voter_alias)
         if voter.is_ai:

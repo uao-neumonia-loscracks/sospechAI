@@ -280,7 +280,7 @@ def test_expired_round_reveals_without_fabricating_a_detection_rate(
     assert result["valid_game"] is False
     assert result["tasa_deteccion"] is None
     assert result["scores"] == {}
-    assert result["interruption_reason"] == "round_timeout"
+    assert result["interruption_reason"] == "quorum_lost"
 
 
 def test_round_window_resets_and_old_response_is_rejected() -> None:

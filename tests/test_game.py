@@ -305,9 +305,7 @@ def reach_discussion_with_clock(clock: Clock) -> tuple[Game, list[str]]:
     return game, aliases
 
 
-def open_voting_with_clock(
-    clock: Clock, *, humans: int = 3
-) -> tuple[Game, list[str]]:
+def open_voting_with_clock(clock: Clock, *, humans: int = 3) -> tuple[Game, list[str]]:
     """Abrir la votación con un reloj controlado y el número de humanos pedido."""
     game = Game(rounds=1, round_timeout=60.0, clock=clock)
     aliases = [game.add_player() for _ in range(humans)]

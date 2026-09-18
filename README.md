@@ -6,6 +6,8 @@ Sistema de conversación multijugador para medir la detección humana de texto g
 
 La interfaz habla con el orquestador. R2 solicita respuestas por gRPC a `impostor-engine`; R1 realiza desde ese servicio la llamada HTTP a Hugging Face. El modelo se ejecuta en el proveedor externo, no en el Droplet.
 
+Diagramas interactivos (abrir en el navegador): [arquitectura de servicios](docs/arquitectura.html) y [ruta de una respuesta del impostor](docs/arquitectura-secuencia.html). Sus fuentes están en [`docs/diagramas/`](docs/diagramas/).
+
 | Componente | Estado en esta rama |
 | --- | --- |
 | Orquestador R2 | Dominio, ventanas, cliente gRPC, manejo de fallos y resultados SQLite de práctica. Servidor multijugador pendiente. |

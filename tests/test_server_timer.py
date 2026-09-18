@@ -19,7 +19,7 @@ import pytest
 
 from proto import impostor_pb2 as pb
 from src.orchestrator.engine_client import EngineClient
-from src.orchestrator.game import Game, GameState
+from src.orchestrator.game import ABSTAIN_SENTINEL, Game, GameState
 from src.orchestrator.server import DEFAULT_PROMPTS, GameServer, ServerConfig
 from src.orchestrator.session import SessionStore
 
@@ -210,7 +210,7 @@ def test_timer_fires_with_zero_client_queries() -> None:
         )
         snapshot = state(api, code, host)
         assert snapshot["state"] == "REVELACION"
-        assert snapshot["result"]["interruption_reason"] == "round_timeout"
+        assert snapshot["result"]["interruption_reason"] == "quorum_lost"
         assert snapshot["result"]["valid_game"] is False
         assert snapshot["result"]["transcript"] == []
 
@@ -227,16 +227,98 @@ def test_timer_leaves_lobby_and_alive_windows_untouched() -> None:
         assert store.room(code).game.state == GameState.ROUND
 
 
-def test_votacion_never_auto_advances() -> None:
-    """Una partida en VOTACION no tiene deadline: las ticks no la mueven."""
-    with serve(timer=True, timer_tick=0.01) as (api, store, _):
+def test_votacion_deadline_closes_valid_game() -> None:
+    """Un voto y una abstención explícita cierran la votación con partida válida."""
+
+    def factory() -> Game:
+        return Game(rounds=1, max_words=15, round_timeout=0.05)
+
+    with serve(timer=True, timer_tick=0.01, game_factory=factory) as (api, store, _):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        token3, _ = join_room(api, code)
+        start_room(api, code, host)
+        submit(api, code, host, "primera respuesta")
+        submit(api, code, token2, "segunda respuesta")
+        submit(api, code, token3, "tercera respuesta")
+        assert_204(api.send("POST", f"/rooms/{code}/voting/open", token=host))
+        assert_204(
+            api.send(
+                "POST",
+                f"/rooms/{code}/votes",
+                payload={"suspect": "Jugador 4"},
+                token=host,
+            )
+        )
+        assert_204(
+            api.send(
+                "POST",
+                f"/rooms/{code}/votes",
+                payload={"suspect": ABSTAIN_SENTINEL},
+                token=token2,
+            )
+        )
+        assert wait_until(
+            lambda: store.room(code).game.state == GameState.REVEAL, timeout=2.0
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+        result = snapshot["result"]
+        assert result["valid_game"] is True
+        assert result["interruption_reason"] is None
+        assert result["votes"] == {
+            "Jugador 1": "Jugador 4",
+            "Jugador 2": None,
+            "Jugador 3": None,
+        }
+        assert result["tasa_deteccion"] == 1.0
+
+
+def test_votacion_deadline_quorum_lost() -> None:
+    """Vencer en VOTACION sin el mínimo de presentes cierra la partida inválida."""
+
+    def factory() -> Game:
+        return Game(rounds=1, max_words=15, round_timeout=0.05)
+
+    with serve(timer=True, timer_tick=0.01, game_factory=factory) as (api, store, _):
         code, host, _ = open_room(api)
         token2, _ = join_room(api, code)
         start_room(api, code, host)
         reach_votacion(api, code, host, token2)
-        assert store.room(code).game.state == GameState.VOTING
-        time.sleep(0.12)
-        assert store.room(code).game.state == GameState.VOTING
+        assert wait_until(
+            lambda: store.room(code).game.state == GameState.REVEAL, timeout=2.0
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+        result = snapshot["result"]
+        assert result["interruption_reason"] == "quorum_lost"
+        assert result["valid_game"] is False
+        assert result["votes"] == {"Jugador 1": None, "Jugador 2": None}
+        assert result["tasa_deteccion"] is None
+
+
+def test_round_deadline_round_timeout_with_quorum_held() -> None:
+    """Vencer en RONDA con el mínimo de humanos presentes cierra por round_timeout."""
+
+    def factory() -> Game:
+        return Game(rounds=1, max_words=15, round_timeout=0.05)
+
+    with serve(timer=True, timer_tick=0.01, game_factory=factory) as (api, store, stub):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        join_room(api, code)  # tercer humano que nunca responde
+        start_room(api, code, host)
+        submit(api, code, host, "primera respuesta")
+        submit(api, code, token2, "segunda respuesta")
+        assert stub.calls == 0  # sin turno de IA: falta un humano por responder
+        assert wait_until(
+            lambda: store.room(code).game.state == GameState.REVEAL, timeout=2.0
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+        result = snapshot["result"]
+        assert result["interruption_reason"] == "round_timeout"
+        assert result["valid_game"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +574,10 @@ def test_ai_has_no_token_and_cannot_vote() -> None:
 def test_timer_reveal_logs_game_once_without_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """El vencimiento por timer registra la partida una vez, sin uso del engine."""
+    """El vencimiento por timer registra la partida una vez, sin uso del engine.
+
+    Sin humanos que respondan en la ronda, el cierre por ventana es quorum_lost.
+    """
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         "src.orchestrator.server.log_game_run",
@@ -513,5 +598,5 @@ def test_timer_reveal_logs_game_once_without_usage(
         assert snapshot["state"] == "REVELACION"
     assert len(calls) == 1
     assert calls[0]["usage"] is None
-    assert calls[0]["result"]["interruption_reason"] == "round_timeout"
+    assert calls[0]["result"]["interruption_reason"] == "quorum_lost"
     assert calls[0]["params"].n_players == 3

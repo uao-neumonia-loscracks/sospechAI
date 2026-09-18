@@ -7,6 +7,14 @@ y ausencia de la conversación).
 """
 
 import dataclasses
+import json
+import random
+import secrets
+import socket
+import threading
+from collections.abc import Callable
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Iterator
 
 import pytest
 
@@ -22,6 +30,7 @@ from src.ui.api import (
     start,
     submit_message,
 )
+from src.ui.sources.http import HttpSospechAI
 from src.ui.words import count_words, within_limit
 
 PUBLIC_STATE_KEYS = (
@@ -415,3 +424,455 @@ def test_mensaje_sobre_el_limite_es_too_many_words_y_no_queda_visible() -> None:
     assert exc_info.value.http_status == 400
     assert updated.messages == snapshot.messages
     assert all(over_limit not in message.text for message in updated.messages)
+
+
+# --- Integración HTTP (tarea 2.7): HttpSospechAI contra un ThreadingHTTPServer local ---
+
+_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+class _TestApiError(Exception):
+    """Falla de negocio del servidor de prueba, traducida a una respuesta no-2xx."""
+
+    def __init__(self, code: str, http_status: int, message: str) -> None:
+        self.code = code
+        self.http_status = http_status
+        self.message = message
+
+
+@dataclasses.dataclass
+class _TestRoom:
+    """Sala del servidor de prueba; espejo mínimo del contrato §§5-7."""
+
+    state: str = "LOBBY"
+    round_number: int = 0
+    rounds: int = 2
+    max_words: int = 15
+    tokens: dict[str, str] = dataclasses.field(default_factory=dict)
+    host_token: str = ""
+    ai_added: bool = False
+    messages: list[dict] = dataclasses.field(default_factory=list)
+    remaining_seconds: float | None = None
+
+
+class _ContractHandler(BaseHTTPRequestHandler):
+    """Handler HTTP estándar que respeta las formas de cable del contrato §§6-8."""
+
+    rooms: dict[str, _TestRoom] = {}
+    request_log: list[tuple[str, str, str | None]] = []
+
+    def log_message(self, format: str, *args: object) -> None:
+        """Silenciar el log por defecto de BaseHTTPRequestHandler."""
+
+    def do_GET(self) -> None:
+        self._dispatch()
+
+    def do_POST(self) -> None:
+        self._dispatch()
+
+    def _dispatch(self) -> None:
+        token = self.headers.get("X-Session-Token")
+        self.request_log.append((self.command, self.path, token))
+        try:
+            handler, args = self._route()
+            handler(token, *args)
+        except _TestApiError as exc:
+            self._send_error(exc.http_status, exc.code, exc.message)
+
+    def _route(self) -> tuple[Callable[..., None], tuple[str, ...]]:
+        parts = [part for part in self.path.strip("/").split("/") if part]
+        if self.command == "POST" and parts == ["rooms"]:
+            return self._op_create, ()
+        if self.command == "POST" and len(parts) == 3 and parts[2] == "join":
+            return self._op_join, (parts[1],)
+        if self.command == "POST" and len(parts) == 3 and parts[2] == "start":
+            return self._op_start, (parts[1],)
+        if self.command == "GET" and len(parts) == 3 and parts[2] == "state":
+            return self._op_state, (parts[1],)
+        if self.command == "POST" and len(parts) == 3 and parts[2] == "messages":
+            return self._op_messages, (parts[1],)
+        if (
+            self.command == "POST"
+            and len(parts) == 4
+            and parts[2] == "voting"
+            and parts[3] == "open"
+        ):
+            return self._op_voting_open, (parts[1],)
+        raise _TestApiError("not_found", 404, "Ruta desconocida.")
+
+    def _op_create(self, _token: str | None) -> None:
+        code = self._new_code()
+        session_token = secrets.token_hex(8)
+        room = _TestRoom()
+        room.tokens[session_token] = "Jugador 1"
+        room.host_token = session_token
+        self.rooms[code] = room
+        self._send_json(
+            201,
+            {"room_code": code, "session_token": session_token, "alias": "Jugador 1"},
+        )
+
+    def _op_join(self, _token: str | None, code: str) -> None:
+        room = self._room(code)
+        if room.state != "LOBBY":
+            raise _TestApiError("wrong_state", 409, "La sala ya no acepta jugadores.")
+        session_token = secrets.token_hex(8)
+        alias = f"Jugador {len(room.tokens) + 1}"
+        room.tokens[session_token] = alias
+        self._send_json(201, {"session_token": session_token, "alias": alias})
+
+    def _op_start(self, token: str | None, code: str) -> None:
+        room = self._room(code)
+        self._alias_for(room, token)
+        if room.state != "LOBBY":
+            raise _TestApiError("wrong_state", 409, "La partida ya comenzó.")
+        if token != room.host_token:
+            raise _TestApiError(
+                "forbidden_host_action", 403, "Solo el anfitrión inicia."
+            )
+        if len(room.tokens) < 2:
+            raise _TestApiError(
+                "invalid_roster", 409, "Se necesitan al menos dos humanos."
+            )
+        room.ai_added = True
+        room.state = "RONDA"
+        room.round_number = 1
+        room.remaining_seconds = 20.0
+        self._send_no_content()
+
+    def _op_state(self, token: str | None, code: str) -> None:
+        room = self._room(code)
+        self._alias_for(room, token)
+        players = list(room.tokens.values())
+        if room.ai_added:
+            players.append(f"Jugador {len(players) + 1}")
+        body = {
+            "state": room.state,
+            "round_number": room.round_number,
+            "rounds": room.rounds,
+            "max_words": room.max_words,
+            "players": players,
+            "messages": [dict(message) for message in room.messages],
+            "votes_received": 0,
+            "remaining_seconds": room.remaining_seconds,
+            "result": None,
+        }
+        self._send_json(200, body)
+
+    def _op_messages(self, token: str | None, code: str) -> None:
+        room = self._room(code)
+        alias = self._alias_for(room, token)
+        if room.state != "RONDA":
+            raise _TestApiError(
+                "wrong_state", 409, "Los mensajes solo se envían en ronda."
+            )
+        text = self._payload().get("text", "")
+        if text == "malformed_error_body":
+            self._send_raw(400, b"el cuerpo de error no es JSON")
+            return
+        normalized = " ".join(text.split())
+        if not normalized:
+            raise _TestApiError("empty_message", 400, "Escribe un mensaje con texto.")
+        if len(normalized.split()) > room.max_words:
+            raise _TestApiError(
+                "too_many_words", 400, f"Máximo {room.max_words} palabras por mensaje."
+            )
+        submitted = [m for m in room.messages if m["round_number"] == room.round_number]
+        if any(m["alias"] == alias for m in submitted):
+            raise _TestApiError(
+                "duplicate_message", 409, "Ya enviaste un mensaje esta ronda."
+            )
+        room.messages.append(
+            {"round_number": room.round_number, "alias": alias, "text": normalized}
+        )
+        self._advance_round(room)
+        self._send_no_content()
+
+    def _op_voting_open(self, token: str | None, code: str) -> None:
+        room = self._room(code)
+        self._alias_for(room, token)
+        if room.state != "DISCUSION":
+            raise _TestApiError(
+                "wrong_state", 409, "La votación solo se abre en debate."
+            )
+        if token != room.host_token:
+            raise _TestApiError(
+                "forbidden_host_action", 403, "Solo el anfitrión abre la votación."
+            )
+        room.state = "VOTACION"
+        room.remaining_seconds = None
+        self._send_no_content()
+
+    def _advance_round(self, room: _TestRoom) -> None:
+        humans = list(room.tokens.values())
+        ai_alias = f"Jugador {len(humans) + 1}"
+        submitted = [
+            m["alias"] for m in room.messages if m["round_number"] == room.round_number
+        ]
+        if not all(human in submitted for human in humans):
+            return
+        if ai_alias not in submitted:
+            room.messages.append(
+                {
+                    "round_number": room.round_number,
+                    "alias": ai_alias,
+                    "text": "Estoy de acuerdo con el resto del grupo.",
+                }
+            )
+        if room.round_number < room.rounds:
+            room.round_number += 1
+        else:
+            room.state = "DISCUSION"
+            room.remaining_seconds = None
+
+    def _room(self, code: str) -> _TestRoom:
+        room = self.rooms.get(code.upper())
+        if room is None:
+            raise _TestApiError("room_not_found", 404, "La sala no existe.")
+        return room
+
+    def _alias_for(self, room: _TestRoom, token: str | None) -> str:
+        alias = room.tokens.get(token or "")
+        if alias is None:
+            raise _TestApiError(
+                "session_expired", 401, "El token de sesión no es válido."
+            )
+        return alias
+
+    def _payload(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        try:
+            return json.loads(raw) if raw else {}
+        except ValueError:
+            raise _TestApiError("malformed_request", 400, "Cuerpo JSON inválido.")
+
+    def _new_code(self) -> str:
+        while True:
+            code = "".join(random.choices(_ALPHABET, k=5))
+            if code not in self.rooms:
+                return code
+
+    def _send_no_content(self) -> None:
+        self.send_response(204)
+        self.end_headers()
+
+    def _send_json(self, status: int, body: dict) -> None:
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_raw(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_error(self, status: int, code: str, message: str) -> None:
+        self._send_json(status, {"code": code, "message": message})
+
+
+@pytest.fixture
+def http_contract() -> Iterator[str]:
+    """Levantar un ThreadingHTTPServer local y devolver su base URL (Arrange)."""
+    _ContractHandler.rooms = {}
+    _ContractHandler.request_log = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ContractHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    yield base_url
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+def _http_started_room(client: HttpSospechAI) -> tuple[RoomIdentity, RoomIdentity]:
+    """Crear, unir y arrancar una sala por HTTP (solo Arrange)."""
+    host = client.create_room()
+    guest = client.join_room(host.room_code)
+    client.start(host.room_code, host.session_token)
+    return host, guest
+
+
+@pytest.mark.integration
+def test_create_room_mapea_201_sin_token_de_sesion(http_contract: str) -> None:
+    """create_room no envía cabecera y mapea el 201 a una identidad de anfitrión."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+
+    # Act
+    identity = client.create_room()
+
+    # Assert
+    assert identity.alias == "Jugador 1"
+    assert identity.room_code.isupper()
+    assert identity.session_token
+    assert ("POST", "/rooms", None) in _ContractHandler.request_log
+
+
+@pytest.mark.integration
+def test_join_room_normaliza_a_mayusculas_y_sin_token(http_contract: str) -> None:
+    """join_room normaliza el código y el 201 llega sin cabecera de sesión."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host = client.create_room()
+
+    # Act
+    guest = client.join_room(host.room_code.lower())
+
+    # Assert
+    assert guest.alias == "Jugador 2"
+    assert guest.room_code.isupper()
+    assert (
+        "POST",
+        f"/rooms/{host.room_code}/join",
+        None,
+    ) in _ContractHandler.request_log
+
+
+@pytest.mark.integration
+def test_flujo_204_200_con_cabecera_recorre_la_maquina(http_contract: str) -> None:
+    """Acciones 204, estado 200 y cabecera X-Session-Token en cada petición autenticada."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host, guest = _http_started_room(client)
+
+    # Act
+    snapshot = client.get_state(host.room_code, host.session_token)
+    client.submit_message(host.room_code, host.session_token, "Yo creo que fue la luz.")
+    client.submit_message(
+        host.room_code, guest.session_token, "Buscaría otra conexión."
+    )
+    client.submit_message(
+        host.room_code, host.session_token, "Me parece bien, seguimos."
+    )
+    client.submit_message(
+        host.room_code, guest.session_token, "Coincido con el equipo."
+    )
+    client.open_voting(host.room_code, host.session_token)
+    after_open = client.get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert snapshot.state == "RONDA"
+    assert snapshot.players == ["Jugador 1", "Jugador 2", "Jugador 3"]
+    assert after_open.state == "VOTACION"
+    assert after_open.round_number == 2
+    assert "Yo creo que fue la luz." in [m.text for m in after_open.messages]
+    assert len(_ContractHandler.request_log) >= 6
+    for method, path, token in _ContractHandler.request_log:
+        if method == "POST" and path == "/rooms":
+            assert token is None
+        elif path.endswith("/join"):
+            assert token is None
+        else:
+            assert token in (host.session_token, guest.session_token)
+
+
+@pytest.mark.integration
+def test_too_many_words_se_parsea_por_code(http_contract: str) -> None:
+    """El 400 con código too_many_words se traduce a ApiError por `code`."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host, _ = _http_started_room(client)
+    over_limit = " ".join(["palabra"] * 20)
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        client.submit_message(host.room_code, host.session_token, over_limit)
+
+    # Assert
+    assert exc_info.value.code == "too_many_words"
+    assert exc_info.value.http_status == 400
+    assert exc_info.value.message == "Máximo 15 palabras por mensaje."
+
+
+@pytest.mark.integration
+def test_session_expired_se_parsea_por_code(http_contract: str) -> None:
+    """El 401 con código session_expired se traduce a ApiError por `code`."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host = client.create_room()
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        client.get_state(host.room_code, "token_no_emitido")
+
+    # Assert
+    assert exc_info.value.code == "session_expired"
+    assert exc_info.value.http_status == 401
+
+
+@pytest.mark.integration
+def test_unirse_tras_start_es_wrong_state_por_http(http_contract: str) -> None:
+    """El 409 con código wrong_state se traduce a ApiError por `code`."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host, _ = _http_started_room(client)
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        client.join_room(host.room_code)
+
+    # Assert
+    assert exc_info.value.code == "wrong_state"
+    assert exc_info.value.http_status == 409
+
+
+@pytest.mark.integration
+def test_error_sin_cuerpo_json_es_malformed_request(http_contract: str) -> None:
+    """Un error no-2xx sin cuerpo JSON válido se traduce a malformed_request (400)."""
+    # Arrange
+    client = HttpSospechAI(base_url=http_contract)
+    host, _ = _http_started_room(client)
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        client.submit_message(
+            host.room_code, host.session_token, "malformed_error_body"
+        )
+
+    # Assert
+    assert exc_info.value.code == "malformed_request"
+    assert exc_info.value.http_status == 400
+
+
+@pytest.mark.integration
+def test_error_de_red_es_internal_sin_detalle_del_proveedor() -> None:
+    """Un fallo de red se traduce a ApiError("internal", 500) sin detalle del proveedor."""
+    # Arrange
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    dead_port = probe.getsockname()[1]
+    probe.close()
+    client = HttpSospechAI(base_url=f"http://127.0.0.1:{dead_port}")
+
+    # Act
+    with pytest.raises(ApiError) as exc_info:
+        client.get_state("AB12C", "token_cualquiera")
+
+    # Assert
+    assert exc_info.value.code == "internal"
+    assert exc_info.value.http_status == 500
+    assert exc_info.value.message == "El orquestador no está disponible (error de red)."
+
+
+@pytest.mark.integration
+def test_selector_http_usa_sospeschai_orchestrator_url(
+    monkeypatch: pytest.MonkeyPatch, http_contract: str
+) -> None:
+    """El swap localizado a http usa la base URL de SOSPECHAI_ORCHESTRATOR_URL (UIF-07)."""
+    # Arrange
+    monkeypatch.setenv("SOSPECHAI_UI_SOURCE", "http")
+    monkeypatch.setenv("SOSPECHAI_ORCHESTRATOR_URL", http_contract)
+
+    # Act
+    identity = create_room()
+
+    # Assert
+    assert identity.alias == "Jugador 1"
+    assert identity.room_code.isupper()
+    assert ("POST", "/rooms", None) in _ContractHandler.request_log

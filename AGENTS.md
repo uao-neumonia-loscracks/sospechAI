@@ -49,6 +49,14 @@ Estas reglas se aplican a todo cambio. Si un cambio las viola, se bloquea.
 - La pantalla de revelacion es un estado de la maquina, no una bandera.
 - La pantalla de consentimiento va antes del lobby.
 
+## Flujo de ramas
+
+- Toda rama feature apunta a `develop`, nunca directo a `main`.
+- `main` solo recibe merges desde `develop`, con PR revisado.
+- Queda prohibido apuntar un PR feature directo a `main`.
+- Despues de mergear, borrar la rama feature en remoto para que GitHub
+  no ofrezca "Compare & pull request" sobre ramas muertas.
+
 ## Commits
 
 - Prefijo: feat:, fix:, test:, chore:

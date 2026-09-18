@@ -1,7 +1,7 @@
-"""Vista de votación vacía y navegable (esqueleto R3-1; contenido en R3-2).
+"""Vista de votación vacía y navegable (UIF-08). Contenido real en R3-2.
 
-No muestra controles de votación ni resultados: la lógica de votación y la
-revelación con contenido son R3-2 (UIF-08).
+No renderiza controles ni ninguna clave de `result` (UIF-08 y UIF-10): la
+votación y la revelación con contenido llegan con R3-2.
 """
 
 import streamlit as st
@@ -10,6 +10,9 @@ from src.ui.screens.context import ScreenContext
 
 
 def render(ctx: ScreenContext) -> None:
-    """Renderizar la vista de votación sin controles ni resultados (UIF-08)."""
+    """Renderizar la votación sin controles ni claves de `result` (UIF-08)."""
     st.title("Votación")
-    st.write("Placeholder navegable: la votación y la revelación llegan con R3-2.")
+    if ctx.snapshot is not None and ctx.snapshot.state == "REVELACION":
+        st.write("La partida terminó. La revelación se presenta con R3-2.")
+    else:
+        st.write("La votación y sus controles llegan con R3-2.")

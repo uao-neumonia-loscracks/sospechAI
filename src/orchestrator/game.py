@@ -15,6 +15,9 @@ from enum import StrEnum
 # La implementación vive en src/common/text.py.
 from src.common.text import normalize_text as normalize_text
 
+# Reservado por el contrato: votar con este alias registra una abstención explícita.
+ABSTAIN_SENTINEL = "__abstain__"
+
 
 class GameState(StrEnum):
     """Etapas permitidas en este primer incremento."""
@@ -71,7 +74,8 @@ class Game:
         self.round_number = 0
         self._players: dict[str, Player] = {}
         self._messages: list[Message] = []
-        self._votes: dict[str, str] = {}
+        self._votes: dict[str, str | None] = {}
+        self._explicit_abstentions: set[str] = set()
         self.round_timeout = round_timeout
         self._clock = clock
         self._deadline: float | None = None
@@ -199,21 +203,32 @@ class Game:
         self._require_state(GameState.DISCUSSION)
         self.state = GameState.VOTING
 
-    def cast_vote(self, voter_alias: str, suspect_alias: str) -> None:
-        """Aceptar un voto por humano y revelar al impostor al recibirlos todos."""
+    def cast_vote(self, voter_alias: str, suspect_alias: str | None) -> None:
+        """Aceptar un voto o una abstención y revelar al completarse la votación.
+
+        Un `suspect_alias` nulo registra una abstención explícita: cuenta como
+        acción para cerrar la votación, pero no es un voto escrutable.
+        """
         self._require_state(GameState.VOTING)
         voter = self._player(voter_alias)
-        self._player(suspect_alias)
         if voter.is_ai:
             raise RuleViolation("En estas reglas provisionales, la IA no vota.")
-        if voter_alias == suspect_alias:
-            raise RuleViolation("En estas reglas provisionales, no puedes votarte.")
         if voter_alias in self._votes:
             raise RuleViolation("Ya registraste tu voto.")
+        if suspect_alias is not None:
+            self._player(suspect_alias)
+            if voter_alias == suspect_alias:
+                raise RuleViolation("En estas reglas provisionales, no puedes votarte.")
         self._votes[voter_alias] = suspect_alias
+        if suspect_alias is None:
+            self._explicit_abstentions.add(voter_alias)
         human_count = sum(not player.is_ai for player in self._players.values())
         if len(self._votes) == human_count:
-            self.state = GameState.REVEAL
+            self._complete_reveal()
+
+    def _complete_reveal(self) -> None:
+        """Revelar cuando todos los humanos ya votaron o se abstuvieron."""
+        self.state = GameState.REVEAL
 
     def public_state(self) -> dict:
         """Ofrecer una vista sin identidades de IA ni votos individuales anticipados."""
@@ -239,15 +254,34 @@ class Game:
             view["result"] = self.result()
         return view
 
+    def _detection_stats(self) -> tuple[dict[str, int], dict[str, int], float | None]:
+        """Calcular aciertos y conteos sobre votos reales; excluir abstenciones.
+
+        La tasa de detección es `None` cuando no hay votos escrutables, incluso
+        en una partida válida, para no fabricar datos inexistentes.
+        """
+        impostor = next(
+            player.alias for player in self._players.values() if player.is_ai
+        )
+        scorable = {
+            alias: suspect
+            for alias, suspect in self._votes.items()
+            if suspect is not None
+        }
+        scores = {
+            alias: int(suspect == impostor) for alias, suspect in scorable.items()
+        }
+        vote_counts = dict(Counter(scorable.values()))
+        tasa_deteccion = sum(scores.values()) / len(scores) if scores else None
+        return scores, vote_counts, tasa_deteccion
+
     def result(self) -> dict:
         """Revelar etiquetas y calcular aciertos solo después de cerrar la votación."""
         self._require_state(GameState.REVEAL)
         impostor = next(
             player.alias for player in self._players.values() if player.is_ai
         )
-        scores = {
-            alias: int(suspect == impostor) for alias, suspect in self._votes.items()
-        }
+        scores, vote_counts, tasa_deteccion = self._detection_stats()
         valid_game = self._interruption_reason is None
         return {
             "state": self.state.value,
@@ -255,13 +289,11 @@ class Game:
             "rounds": self.rounds,
             "max_words": self.max_words,
             "votes": dict(self._votes),
-            "vote_counts": dict(Counter(self._votes.values())),
+            "vote_counts": vote_counts,
             "scores": scores if valid_game else {},
             "valid_game": valid_game,
             "interruption_reason": self._interruption_reason,
-            "tasa_deteccion": (
-                sum(scores.values()) / len(scores) if valid_game else None
-            ),
+            "tasa_deteccion": tasa_deteccion if valid_game else None,
             "transcript": [
                 {
                     "round_number": message.round_number,

@@ -28,6 +28,18 @@ def reach_voting() -> tuple[Game, list[str]]:
     return game, aliases
 
 
+def reach_voting_with_two_humans() -> tuple[Game, list[str]]:
+    """Abrir la votación con dos humanos y una IA para probar las abstenciones."""
+    game = Game(rounds=1)
+    aliases = [game.add_player() for _ in range(2)]
+    aliases.append(game.add_player(is_ai=True))
+    game.start()
+    for alias in aliases:
+        game.submit_message(alias, "Una respuesta de prueba.")
+    game.open_voting()
+    return game, aliases
+
+
 @pytest.mark.parametrize("humans,has_ai", [(0, False), (1, True), (3, False)])
 def test_start_requires_players_and_one_ai(humans: int, has_ai: bool) -> None:
     """Una sala incompleta no inicia ni abandona el lobby."""
@@ -165,6 +177,61 @@ def test_last_vote_reveals_results_and_locks_the_game() -> None:
         game.cast_vote(aliases[2], aliases[3])
     with pytest.raises(RuleViolation):
         game.submit_message(aliases[0], "Mensaje tardío")
+
+
+def test_explicit_abstention_completes_voting() -> None:
+    """Abstenerse cuenta como acción: revela sin bloquear la partida."""
+    game, aliases = reach_voting_with_two_humans()
+    impostor = aliases[2]
+    game.cast_vote(aliases[0], impostor)
+    game.cast_vote(aliases[1], None)
+    assert game.state == GameState.REVEAL
+    result = game.result()
+    assert result["valid_game"] is True
+    assert result["votes"] == {aliases[0]: impostor, aliases[1]: None}
+    assert result["tasa_deteccion"] == pytest.approx(1.0)
+
+
+def test_abstention_is_excluded_from_detection_metrics() -> None:
+    """La abstención no aparece en el conteo de votos ni en los aciertos."""
+    game, aliases = reach_voting_with_two_humans()
+    impostor = aliases[2]
+    game.cast_vote(aliases[0], impostor)
+    game.cast_vote(aliases[1], None)
+    result = game.result()
+    assert result["vote_counts"] == {impostor: 1}
+    assert result["scores"] == {aliases[0]: 1}
+    assert aliases[1] not in result["vote_counts"]
+    assert aliases[1] not in result["scores"]
+
+
+def test_all_humans_abstain_is_valid_without_detection_data() -> None:
+    """Una partida válida sin votos escrutables no fabrica una tasa de detección."""
+    game, aliases = reach_voting_with_two_humans()
+    game.cast_vote(aliases[0], None)
+    game.cast_vote(aliases[1], None)
+    assert game.state == GameState.REVEAL
+    result = game.result()
+    assert result["valid_game"] is True
+    assert result["votes"] == {aliases[0]: None, aliases[1]: None}
+    assert result["vote_counts"] == {}
+    assert result["scores"] == {}
+    assert result["tasa_deteccion"] is None
+
+
+def test_abstention_never_tallies_for_the_impostor() -> None:
+    """El conteo del impostor solo suma votos reales, nunca abstenciones."""
+    game, aliases = reach_voting()
+    impostor = aliases[3]
+    game.cast_vote(aliases[0], impostor)
+    game.cast_vote(aliases[1], aliases[2])
+    game.cast_vote(aliases[2], None)
+    assert game.state == GameState.REVEAL
+    result = game.result()
+    assert result["vote_counts"] == {impostor: 1, aliases[2]: 1}
+    assert None not in result["vote_counts"]
+    assert result["scores"] == {aliases[0]: 1, aliases[1]: 0}
+    assert result["tasa_deteccion"] == pytest.approx(0.5)
 
 
 def test_public_snapshot_cannot_mutate_the_game() -> None:

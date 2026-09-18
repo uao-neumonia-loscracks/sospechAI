@@ -245,6 +245,7 @@ Ejemplo (RONDA, ronda 1):
 | `valid_game` | boolean | `false` si interrumpida |
 | `interruption_reason` | string \| null | Código de interrupción o `null` |
 | `tasa_deteccion` | float \| null | `null` si interrumpida |
+| `prompt_version` | string \| null | Versión del prompt del impostor; default "v2" |
 | `transcript` | object[] | `{round_number, alias, text, is_ai}` — **el único lugar donde se revela `is_ai`** |
 
 Ejemplo (REVELACION, partida válida):
@@ -405,3 +406,4 @@ Estos cuatro puntos **no se resuelven en este contrato**; quedan asignados al ro
 | Versión | Fecha | Cambio |
 |---|---|---|
 | 1.0 | 2026-09-16 | Congelación inicial para R2 (R2-1 / A9). |
+| 1.1 | 2026-09-18 | Clave aditiva prompt_version en result() para transparencia del prompt del impostor (R3-2) |

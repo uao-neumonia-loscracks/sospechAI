@@ -14,6 +14,16 @@ from src.ui.screens.context import ScreenContext
 
 def render(ctx: ScreenContext) -> None:
     """Renderizar la votación con controles reales contra `ctx.on_submit_vote`."""
+
+    def _vote() -> None:
+        """Registrar el voto y limpiar el selectbox en el mismo ciclo."""
+        suspect = st.session_state.get("vote_suspect")
+        if suspect is None or ctx.on_submit_vote is None:
+            return
+        ctx.on_submit_vote(suspect)
+        if st.session_state.get("notice") is None:
+            st.session_state["vote_accepted"] = True
+
     st.title("Votación")
     if ctx.snapshot is None or ctx.room_identity is None:
         st.write("La votación aún no ha cargado. Esperando la primera instantánea…")
@@ -24,12 +34,12 @@ def render(ctx: ScreenContext) -> None:
     if st.session_state.get("vote_accepted", False):
         st.success("Voto registrado; esperando al resto.")
     elif suspects:
-        suspect = st.selectbox("¿Quién creés que es el impostor?", suspects)
-        vote_clicked = st.button("Votar", key="submit_vote")
-        if vote_clicked and ctx.on_submit_vote is not None:
-            ctx.on_submit_vote(suspect)
-            if st.session_state.get("notice") is None:
-                st.session_state["vote_accepted"] = True
+        st.selectbox(
+            "¿Quién creés que es el impostor?",
+            suspects,
+            key="vote_suspect",
+        )
+        st.button("Votar", key="submit_vote", on_click=_vote)
     else:
         st.write("No hay sospechosos para votar todavía.")
     st.caption(f"Votos recibidos: {ctx.snapshot.votes_received}")

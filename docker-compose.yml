@@ -1,15 +1,15 @@
 # SospechAI · docker compose
 #
-# Estado (miércoles 16 sep): solo impostor-engine existe y tiene entrypoint
-# de servidor. Los servicios impostor-orchestrator y impostor-ui quedan
-# marcados como pendientes hasta que R2 entregue el servidor HTTP del
-# contrato UI-orquestador (A9) y R3 entregue la carpeta src/ui.
-# La demo del 19 se apoya en el PLAN B (tres terminales) mientras tanto.
+# Estado (viernes 18 sep): los tres servicios están operativos y se despliegan
+# juntos — impostor-engine (gRPC 50051, solo red interna), impostor-orchestrator
+# (HTTP 8080, solo red interna) y impostor-ui (Streamlit 8501, único puerto
+# expuesto al host). Ya no hay pendientes R2/R3: la demo del 19 se apoya en
+# este compose; el Plan B (tres terminales) sigue como alternativa.
 #
 # Uso:
 #   docker compose up --build -d
 #   docker compose ps
-#   docker compose logs -f impostor-engine
+#   docker compose logs -f impostor-ui
 
 services:
   impostor-engine:
@@ -24,36 +24,56 @@ services:
     restart: unless-stopped
     # SIN ports: el gRPC (50051) queda solo en la red interna, nunca sale
     # al host. La Inference API sale por la red normal del daemon.
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - python
+        - -c
+        - 'import socket; socket.create_connection(("127.0.0.1", 50051), 2).close()'
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
 
-  # --- PENDIENTE R2: requiere el servidor HTTP del contrato UI-orquestador.
-  # impostor-orchestrator:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.orchestrator
-  #   container_name: impostor-orchestrator
-  #   depends_on:
-  #     - impostor-engine
-  #   environment:
-  #     ENGINE_ADDR: impostor-engine:50051
-  #   volumes:
-  #     - sqlite-data:/app/data
-  #   networks:
-  #     - sospechai-net
-  #   restart: unless-stopped
+  # Orquestador: servidor HTTP del juego (contrato UI-orquestador). No expone
+  # puertos al host: la UI lo alcanza por el nombre de servicio interno.
+  impostor-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    container_name: impostor-orchestrator
+    depends_on:
+      impostor-engine:
+        condition: service_healthy
+    environment:
+      SOSPECHAI_MODEL_ID: ${SOSPECHAI_MODEL_ID:?Definí SOSPECHAI_MODEL_ID en .env (ver .env.example)}
+      SOSPECHAI_ENGINE_ADDR: impostor-engine:50051
+      SOSPECHAI_EVENTS_DB: /app/data/game_events.sqlite3
+    volumes:
+      - sqlite-data:/app/data
+    networks:
+      - sospechai-net
+    restart: unless-stopped
 
-  # --- PENDIENTE R3: no existe src/ui todavía.
-  # impostor-ui:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.ui
-  #   container_name: impostor-ui
-  #   depends_on:
-  #     - impostor-orchestrator
-  #   ports:
-  #     - "8080:8080"   # ÚNICO puerto que se expone al host.
-  #   networks:
-  #     - sospechai-net
-  #   restart: unless-stopped
+  # UI: frontend Streamlit; único servicio con puerto expuesto al host.
+  impostor-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: impostor-ui
+    depends_on:
+      - impostor-orchestrator
+    environment:
+      SOSPECHAI_UI_SOURCE: http
+      SOSPECHAI_ORCHESTRATOR_URL: http://impostor-orchestrator:8080
+    ports:
+      - "8501:8501"   # ÚNICO puerto que se expone al host.
+    networks:
+      - sospechai-net
+    restart: unless-stopped
 
 networks:
   sospechai-net:

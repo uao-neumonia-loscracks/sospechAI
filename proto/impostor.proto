@@ -1,5 +1,4 @@
-// BORRADOR para revisión conjunta de R1 y R2. No es un contrato congelado.
-// Conserva nombres y números de los campos del borrador del Módulo 2.
+// CONGELADO v1 — contrato aprobado por R1 y R2. No modificar sin ADR aprobado.
 syntax = "proto3";
 package impostor.v1;
 

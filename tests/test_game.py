@@ -10,6 +10,28 @@ from src.orchestrator.game import Game, GameState, RuleViolation
 from src.orchestrator.storage import save_practice_game
 
 
+class Clock:
+    """Reloj determinista con `now` mutable y `advance(segundos)` para pruebas."""
+
+    def __init__(self, now: float = 0.0) -> None:
+        """Fijar el instante inicial elegido por la prueba."""
+        self.now = now
+
+    def __call__(self) -> float:
+        """Devolver el instante actual sin esperar tiempo real."""
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        """Sumar segundos al instante actual."""
+        self.now += seconds
+
+
+@pytest.fixture
+def clock() -> Clock:
+    """Reloj de prueba para conducir vencimientos sin pausas reales."""
+    return Clock()
+
+
 def make_game(*, rounds: int = 1, max_words: int = 15) -> tuple[Game, list[str]]:
     """Preparar tres humanos y una IA para las pruebas."""
     game = Game(rounds=rounds, max_words=max_words)
@@ -270,3 +292,145 @@ def test_unfinished_game_is_not_saved(tmp_path: Path) -> None:
     with pytest.raises(RuleViolation):
         save_practice_game(game, database)
     assert not database.exists()
+
+
+def reach_discussion_with_clock(clock: Clock) -> tuple[Game, list[str]]:
+    """Completar las respuestas para probar el vencimiento de la discusión."""
+    game = Game(rounds=1, round_timeout=60.0, clock=clock)
+    aliases = [game.add_player() for _ in range(3)]
+    aliases.append(game.add_player(is_ai=True))
+    game.start()
+    for alias in aliases:
+        game.submit_message(alias, "Una respuesta de prueba.")
+    return game, aliases
+
+
+def open_voting_with_clock(
+    clock: Clock, *, humans: int = 3
+) -> tuple[Game, list[str]]:
+    """Abrir la votación con un reloj controlado y el número de humanos pedido."""
+    game = Game(rounds=1, round_timeout=60.0, clock=clock)
+    aliases = [game.add_player() for _ in range(humans)]
+    aliases.append(game.add_player(is_ai=True))
+    game.start()
+    for alias in aliases:
+        game.submit_message(alias, "Una respuesta de prueba.")
+    game.open_voting()
+    return game, aliases
+
+
+# ---------------------------------------------------------------------------
+# Vencimientos por fase y quorum (R2-4)
+# ---------------------------------------------------------------------------
+
+
+def test_discussion_deadline_auto_advances_with_fresh_deadline(clock: Clock) -> None:
+    """Una discusión sin actividad avanza a votación con una ventana nueva."""
+    game, _ = reach_discussion_with_clock(clock)
+    assert game.state == GameState.DISCUSSION
+    assert game.remaining_time() == pytest.approx(60.0)
+    clock.advance(60.0)
+    game.check_expiration()
+    assert game.state == GameState.VOTING
+    assert game.remaining_time() == pytest.approx(60.0)
+    assert "result" not in game.public_state()
+
+
+def test_silent_disconnect_deadline_abstains_with_quorum_held(clock: Clock) -> None:
+    """Una humana que no vota queda absuelta por vencimiento sin invalidar la partida."""
+    game, aliases = open_voting_with_clock(clock)
+    impostor = aliases[3]
+    game.cast_vote(aliases[0], impostor)
+    game.cast_vote(aliases[1], aliases[2])
+    clock.advance(60.0)
+    game.check_expiration()
+    assert game.state == GameState.REVEAL
+    result = game.result()
+    assert result["valid_game"] is True
+    assert result["interruption_reason"] is None
+    assert result["votes"] == {
+        aliases[0]: impostor,
+        aliases[1]: aliases[2],
+        aliases[2]: None,
+    }
+    assert result["tasa_deteccion"] == pytest.approx(0.5)
+
+
+def test_voting_deadline_quorum_lost_closes_invalid(clock: Clock) -> None:
+    """Menos de dos presentes al vencimiento cierran la partida como inválida."""
+    game, _ = open_voting_with_clock(clock, humans=2)
+    clock.advance(60.0)
+    game.check_expiration()
+    assert game.state == GameState.REVEAL
+    result = game.result()
+    assert result["interruption_reason"] == "quorum_lost"
+    assert result["valid_game"] is False
+    assert result["scores"] == {}
+    assert result["tasa_deteccion"] is None
+
+
+def test_round_expiry_quorum_lost_when_below_minimum(clock: Clock) -> None:
+    """El quorum precede al vencimiento de ronda cuando falta una humana."""
+    game = Game(rounds=1, round_timeout=60.0, clock=clock)
+    aliases = [game.add_player() for _ in range(2)]
+    aliases.append(game.add_player(is_ai=True))
+    game.start()
+    game.submit_message(aliases[0], "Solo una humana responde.")
+    clock.advance(60.0)
+    game.check_expiration()
+    assert game.state == GameState.REVEAL
+    assert game.result()["interruption_reason"] == "quorum_lost"
+
+
+def test_exactly_two_present_humans_hold_quorum(clock: Clock) -> None:
+    """Dos presentes en el límite sostienen el quorum y cierran la partida válida."""
+    game, aliases = open_voting_with_clock(clock)
+    impostor = aliases[3]
+    game.cast_vote(aliases[0], impostor)
+    game.cast_vote(aliases[1], None)
+    clock.advance(60.0)
+    game.check_expiration()
+    assert game.state == GameState.REVEAL
+    result = game.result()
+    assert result["valid_game"] is True
+    assert result["interruption_reason"] is None
+    assert result["votes"] == {
+        aliases[0]: impostor,
+        aliases[1]: None,
+        aliases[2]: None,
+    }
+
+
+def test_post_deadline_vote_is_rejected_after_sweep(clock: Clock) -> None:
+    """Un voto posterior al vencimiento no entra en la fase ya cerrada."""
+    game, aliases = open_voting_with_clock(clock, humans=2)
+    clock.advance(60.0)
+    with pytest.raises(RuleViolation):
+        game.cast_vote(aliases[0], aliases[2])
+    assert game.state == GameState.REVEAL
+    assert game.result()["interruption_reason"] == "quorum_lost"
+
+
+def test_no_deadline_game_never_expires() -> None:
+    """Una partida sin ventana no expira en ninguna fase temporal."""
+    game = Game(rounds=2, round_timeout=None)
+    aliases = [game.add_player() for _ in range(3)]
+    aliases.append(game.add_player(is_ai=True))
+    game.start()
+    game.check_expiration()
+    assert game.state == GameState.ROUND
+    for alias in aliases[:3]:
+        game.submit_message(alias, "Una respuesta de prueba.")
+    game.submit_message(aliases[3], "Respuesta de la IA.")
+    assert game.state == GameState.ROUND
+    game.check_expiration()
+    assert game.state == GameState.ROUND
+    for alias in aliases[:3]:
+        game.submit_message(alias, "Una respuesta de prueba.")
+    game.submit_message(aliases[3], "Respuesta de la IA.")
+    assert game.state == GameState.DISCUSSION
+    game.check_expiration()
+    assert game.state == GameState.DISCUSSION
+    game.open_voting()
+    game.check_expiration()
+    assert game.state == GameState.VOTING

@@ -79,7 +79,10 @@ def test_random_votes_never_target_the_voter(seed: int) -> None:
 
 
 def test_slow_bots_expire_the_round_and_skip_the_engine() -> None:
-    """Si los bots tardan más que la ventana, la partida se interrumpe sin tasa."""
+    """Si los bots tardan más que la ventana, la partida se interrumpe sin tasa.
+
+    Sin humanos que respondan en la ronda, el cierre por ventana es quorum_lost.
+    """
     # Arrange
     config = HarnessConfig(bots=3, round_timeout=5.0, response_delay=5.0)
     stub = ScriptedEngineStub()
@@ -89,7 +92,7 @@ def test_slow_bots_expire_the_round_and_skip_the_engine() -> None:
 
     # Assert
     assert result["valid_game"] is False
-    assert result["interruption_reason"] == "round_timeout"
+    assert result["interruption_reason"] == "quorum_lost"
     assert result["tasa_deteccion"] is None
     assert stub.requests == []
 

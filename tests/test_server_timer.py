@@ -492,7 +492,10 @@ def test_ai_has_no_token_and_cannot_vote() -> None:
 def test_timer_reveal_logs_game_once_without_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """El vencimiento por timer registra la partida una vez, sin uso del engine."""
+    """El vencimiento por timer registra la partida una vez, sin uso del engine.
+
+    Sin humanos que respondan en la ronda, el cierre por ventana es quorum_lost.
+    """
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         "src.orchestrator.server.log_game_run",
@@ -513,5 +516,5 @@ def test_timer_reveal_logs_game_once_without_usage(
         assert snapshot["state"] == "REVELACION"
     assert len(calls) == 1
     assert calls[0]["usage"] is None
-    assert calls[0]["result"]["interruption_reason"] == "round_timeout"
+    assert calls[0]["result"]["interruption_reason"] == "quorum_lost"
     assert calls[0]["params"].n_players == 3

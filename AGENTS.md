@@ -10,6 +10,10 @@ Estas reglas se aplican a todo cambio. Si un cambio las viola, se bloquea.
   comunicacion permitida es por gRPC a traves del contrato.
 - `src/impostor_engine/` NO conoce rondas, votos, jugadores, puntajes ni partidas.
   Si aparece cualquiera de esas palabras en el engine, es un error de diseno.
+- `src/common/` es la zona neutral para codigo compartido. `src/orchestrator/` y
+  `src/impostor_engine/` pueden importarla; no es un pasadizo entre modulos.
+  Solo aloja codigo puro y sin estado: no conoce rondas, votos, jugadores,
+  puntajes, partidas, gRPC ni HTTP.
 - `src/ui/` NUNCA habla gRPC directo con el engine. Solo con el orquestador.
 - Ningun modulo accede a atributos privados (_x) de otro modulo.
 

@@ -44,6 +44,7 @@ PUBLIC_STATE_KEYS = (
     "votes_received",
     "remaining_seconds",
     "result",
+    "round_prompt",
 )
 RESULT_KEYS = (
     "state",
@@ -148,6 +149,61 @@ def test_from_mapping_convierte_los_mensajes_a_chat_message() -> None:
     ]
 
 
+def test_from_mapping_lee_round_prompt_y_tolera_su_ausencia() -> None:
+    """round_prompt pasa del cable a la instantánea; sin la clave, None (v1.0)."""
+    # Arrange
+    raw = {
+        "state": "RONDA",
+        "round_number": 1,
+        "rounds": 2,
+        "max_words": 15,
+        "players": ["Jugador 1", "Jugador 2", "Jugador 3"],
+        "messages": [],
+        "votes_received": 0,
+        "remaining_seconds": 20.0,
+        "round_prompt": "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
+    }
+    legacy = dict(raw)
+    del legacy["round_prompt"]
+
+    # Act
+    with_prompt = StateSnapshot.from_mapping(raw)
+    without_prompt = StateSnapshot.from_mapping(legacy)
+
+    # Assert
+    assert with_prompt.round_prompt == raw["round_prompt"]
+    assert without_prompt.round_prompt is None
+
+
+def test_round_prompt_del_fake_se_expone_en_la_ronda() -> None:
+    """El fake publica la pregunta de la ronda vigente para los humanos (UIF-07)."""
+    # Arrange
+    host, _ = _started_room()
+
+    # Act
+    snapshot = get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert snapshot.state == "RONDA"
+    assert snapshot.round_prompt == (
+        "¿Qué harías si se va la luz justo antes de entregar un trabajo?"
+    )
+
+
+def test_round_prompt_del_fake_cambia_por_ronda() -> None:
+    """En la segunda ronda el fake publica la segunda pregunta del contrato."""
+    # Arrange
+    host, _ = _started_room()
+    submit_message(host.room_code, host.session_token, "Yo creo que fue la luz.")
+
+    # Act
+    snapshot = get_state(host.room_code, host.session_token)
+
+    # Assert
+    assert snapshot.round_number == 2
+    assert snapshot.round_prompt == "¿Qué comida escogerías después de una clase larga?"
+
+
 def test_from_mapping_conserva_result_en_revelacion() -> None:
     """En REVELACION el `result` embebido se conserva sin remodelar (contrato §7.2)."""
     # Arrange
@@ -198,6 +254,7 @@ def test_create_room_devuelve_anfitrion_en_lobby() -> None:
     assert host.alias == "Jugador 1"
     assert snapshot.state == "LOBBY"
     assert snapshot.round_number == 0
+    assert snapshot.round_prompt is None
     assert snapshot.players == ["Jugador 1"]
 
 

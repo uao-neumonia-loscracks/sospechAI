@@ -14,6 +14,12 @@ from src.ui.api import ApiError, RoomIdentity, StateSnapshot
 from src.ui.words import normalize_text
 
 ROOM_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+# Preguntas de ronda del contrato §7.1 (espejo de src/orchestrator/game.py,
+# copiadas, nunca importadas): el impostor las conoce y el humano las lee.
+ROUND_PROMPTS = (
+    "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
+    "¿Qué comida escogerías después de una clase larga?",
+)
 SCRIPTED_RESPONSES = (
     (
         "Intentaría compartir internet desde el celular y avisarle al profesor.",
@@ -213,6 +219,9 @@ class FakeSospechAI:
         view: dict = {
             "state": room.state,
             "round_number": room.round_number,
+            "round_prompt": (
+                ROUND_PROMPTS[room.round_number - 1] if room.round_number >= 1 else None
+            ),
             "rounds": room.rounds,
             "max_words": room.max_words,
             "players": list(room.players),

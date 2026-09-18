@@ -7,7 +7,7 @@ documentadas en docs/ACUERDOS_R2.md; todavía no es un servidor multijugador.
 import math
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -17,6 +17,13 @@ from src.common.text import normalize_text as normalize_text
 
 # Reservado por el contrato: votar con este alias registra una abstención explícita.
 ABSTAIN_SENTINEL = "__abstain__"
+
+# Pregunta/tema de cada ronda: la IA la usa para generar su respuesta y la vista
+# la expone a los humanos (round_prompt). Fijas por ahora; el servidor las inyecta.
+DEFAULT_PROMPTS = (
+    "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
+    "¿Qué comida escogerías después de una clase larga?",
+)
 
 
 class GameState(StrEnum):
@@ -72,10 +79,11 @@ class Game:
         rounds: int = 2,
         max_words: int = 15,
         round_timeout: float | None = 20.0,
+        prompts: Sequence[str] | None = None,
         clock: Callable[[], float] = time.monotonic,
         event_sink: EventSink | None = None,
     ) -> None:
-        """Crear una sala vacía con reglas explícitas y modificables."""
+        """Crear una sala vacía con reglas explícitas y preguntas inyectables."""
         if rounds < 1 or max_words < 1:
             raise ValueError("Las rondas y el límite de palabras deben ser positivos.")
         if round_timeout is not None and (
@@ -86,6 +94,7 @@ class Game:
         self.max_words = max_words
         self.state = GameState.LOBBY
         self.round_number = 0
+        self.prompts = tuple(prompts) if prompts is not None else DEFAULT_PROMPTS
         self._players: dict[str, Player] = {}
         self._messages: list[Message] = []
         self._votes: dict[str, str | None] = {}
@@ -320,6 +329,11 @@ class Game:
         view = {
             "state": self.state.value,
             "round_number": self.round_number,
+            "round_prompt": (
+                self.prompts[self.round_number - 1]
+                if self.round_number >= 1 and self.round_number <= len(self.prompts)
+                else None
+            ),
             "rounds": self.rounds,
             "max_words": self.max_words,
             "players": list(self._players),

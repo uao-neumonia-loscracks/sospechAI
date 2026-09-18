@@ -207,6 +207,7 @@ Errores: `session_expired` (401), `not_a_player` (403), `room_not_found` (404).
 |---|---|---|
 | `state` | string | Valor congelado (§5) |
 | `round_number` | number \| null | Ronda actual; fuera de RONDA según dominio |
+| `round_prompt` | string \| null | Pregunta/tema de la ronda vigente; presente solo con `round_number` >= 1 (null en LOBBY). La UI debe mostrarla al humano durante RONDA y DISCUSION |
 | `rounds` | number | Total de rondas configurado |
 | `max_words` | number | Límite de palabras por mensaje (default 15) |
 | `players` | string[] | **Solo alias** ("Jugador N"), incluyendo a la IA |
@@ -221,6 +222,7 @@ Ejemplo (RONDA, ronda 1):
 {
   "state": "RONDA",
   "round_number": 1,
+  "round_prompt": "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
   "rounds": 3,
   "max_words": 15,
   "players": ["Jugador 1", "Jugador 2", "Jugador 3"],
@@ -413,3 +415,4 @@ Estos cuatro puntos **no se resuelven en este contrato**; quedan asignados al ro
 | 1.0 | 2026-09-16 | Congelación inicial para R2 (R2-1 / A9). |
 | 1.1 | 2026-09-17 | Abstención explícita por sentinel `"__abstain__"` en `/votes` (§6.6); ventanas por fase para DISCUSION/VOTACION con cierre por quórum (§12); `remaining_seconds` por fase y votos `null` en `result()`. Cambios aditivos: los clientes v1.0 siguen siendo válidos. |
 | 1.1 | 2026-09-18 | Clave aditiva prompt_version en result() para transparencia del prompt del impostor (R3-2) |
+| 1.1 | 2026-09-18 | Clave aditiva round_prompt en public_state() para que los humanos lean la pregunta de la ronda (§7.1) |

@@ -47,7 +47,12 @@ def render(ctx: ScreenContext) -> None:
 
 
 def _render_messages(ctx: ScreenContext) -> None:
-    """Listar los mensajes por alias desde la última instantánea del orquestador."""
+    """Mostrar la pregunta de la ronda y los mensajes por alias desde el orquestador."""
     st.write(f"Ronda {ctx.snapshot.round_number}")
+    if ctx.snapshot.round_prompt is not None and ctx.snapshot.state in (
+        "RONDA",
+        "DISCUSION",
+    ):
+        st.subheader(ctx.snapshot.round_prompt)
     for message in ctx.snapshot.messages:
         st.write(f"**{message.alias}**: {message.text}")

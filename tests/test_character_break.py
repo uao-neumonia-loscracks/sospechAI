@@ -18,6 +18,11 @@ def test_each_pattern_detects_its_phrase(label: str, phrase: str) -> None:
     assert detect_character_break(phrase) == [label]
 
 
+def test_detects_soy_el_modelo_de_lenguaje() -> None:
+    """Regression: variante con artículo 'el' detectada tras el falso negativo."""
+    assert detect_character_break("NO. Soy el modelo de lenguaje.") == ["model_claim"]
+
+
 def test_matches_case_insensitively() -> None:
     """Mayúsculas y minúsculas se detectan igual."""
     assert detect_character_break("SOY UNA IA") == ["ai_claim"]

@@ -1,0 +1,17 @@
+# Contexto de build mínimo y seguro: nada de secretos ni datos locales.
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.atl/
+.coverage
+.env
+.env.*
+!.env.example
+data/
+tests/
+docs/
+scripts/
+*.sqlite3
+.git/
+.gitignore

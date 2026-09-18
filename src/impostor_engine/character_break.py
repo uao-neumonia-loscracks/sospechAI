@@ -26,9 +26,11 @@ CHARACTER_BREAK_PATTERNS: tuple[tuple[str, str], ...] = (
     ("ai_claim", "soy la ia"),
     # Afirmar ser un modelo de lenguaje, incluida la forma "como modelo".
     ("model_claim", "soy un modelo de lenguaje"),
+    ("model_claim", "soy el modelo de lenguaje"),
     ("model_claim", "como modelo de lenguaje"),
     ("model_claim", "como un modelo de lenguaje"),
     ("model_claim", "soy un modelo de ia"),
+    ("model_claim", "soy el modelo de ia"),
     # Afirmar ser un asistente virtual.
     ("assistant_claim", "soy un asistente"),
     ("assistant_claim", "soy tu asistente"),

@@ -55,28 +55,49 @@ def test_latency_p95_with_single_element_returns_it() -> None:
     assert result == pytest.approx(42.0)
 
 
-def test_latency_p95_interpolates_between_ranks() -> None:
-    """Con cinco muestras el P95 interpola y no es ni la mediana ni el máximo.
+def test_latency_p95_uses_nearest_rank() -> None:
+    """Con veinte muestras el P95 es el valor del índice ceil(0.95*20)-1.
 
-    Posición (5 - 1) * 0.95 = 3.8: interpola entre 4.0 (índice 3) y 100.0
-    (índice 4) con peso 0.8, resultado 80.8.
+    Criterio del plan (rango más próximo): ordenar y tomar el índice 18
+    (base 0) = el valor 19.0, sin interpolar entre muestras.
     """
     # Arrange
-    latencies = [1.0, 2.0, 3.0, 4.0, 100.0]
+    latencies = list(range(1, 21))
     # Act
     result = latency_p95(latencies)
     # Assert
-    assert result == pytest.approx(80.8)
+    assert result == pytest.approx(19.0)
 
 
 def test_latency_p95_is_order_independent() -> None:
     """El percentil no depende del orden de llegada de las muestras."""
     # Arrange
-    latencies = [100.0, 3.0, 1.0, 4.0, 2.0]
+    latencies = [
+        20.0,
+        3.0,
+        1.0,
+        4.0,
+        2.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        5.0,
+        19.0,
+        18.0,
+        17.0,
+        16.0,
+        15.0,
+        14.0,
+        13.0,
+        12.0,
+        11.0,
+        10.0,
+    ]
     # Act
     result = latency_p95(latencies)
     # Assert
-    assert result == pytest.approx(80.8)
+    assert result == pytest.approx(19.0)
 
 
 def test_estimated_cost_without_pricing_returns_none() -> None:

@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "SospechAI: ruta de una respuesta del impostor",
+    "output": "../arquitectura-secuencia.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1000,
+      566
+    ],
+    "column_fit": "spread",
+    "views": [
+      {
+        "id": "pedido",
+        "label": "Pedido por contrato",
+        "focus": [
+          "game",
+          "client",
+          "engine"
+        ],
+        "note": "El orquestador valida el turno y fija un deadline que nunca supera la ventana restante."
+      },
+      {
+        "id": "generacion",
+        "label": "Generación remota",
+        "focus": [
+          "engine",
+          "hf"
+        ],
+        "note": "Solo el engine habla HTTP con el proveedor y corta en max_words."
+      },
+      {
+        "id": "cierre",
+        "label": "Cierre del stream",
+        "focus": [
+          "engine",
+          "client",
+          "game"
+        ],
+        "note": "Final vacío con is_final y trailing metadata; un stream incompleto se descarta entero."
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "game",
+      "type": "backend",
+      "label": "Game",
+      "sublabel": "orquestador: reglas"
+    },
+    {
+      "id": "client",
+      "type": "backend",
+      "label": "EngineClient",
+      "sublabel": "orquestador: gRPC"
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "impostor-engine",
+      "sublabel": "servicer gRPC"
+    },
+    {
+      "id": "hf",
+      "type": "external",
+      "label": "Inference API",
+      "sublabel": "HF router"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 232,
+      "label": "Pedido"
+    },
+    {
+      "from": 242,
+      "to": 318,
+      "label": "Generación"
+    },
+    {
+      "from": 328,
+      "to": 478,
+      "label": "Cierre y publicación"
+    }
+  ],
+  "messages": [
+    {
+      "from": "game",
+      "to": "client",
+      "y": 176,
+      "label": "generate(req, deadline)",
+      "variant": "emphasis"
+    },
+    {
+      "from": "client",
+      "to": "engine",
+      "y": 214,
+      "label": "GenerateUtterance",
+      "variant": "emphasis"
+    },
+    {
+      "from": "engine",
+      "to": "hf",
+      "y": 262,
+      "label": "POST stream (HTTPS)",
+      "variant": "security"
+    },
+    {
+      "from": "hf",
+      "to": "engine",
+      "y": 300,
+      "label": "deltas SSE + usage",
+      "variant": "return"
+    },
+    {
+      "from": "engine",
+      "to": "client",
+      "y": 348,
+      "label": "chunks text_delta",
+      "variant": "default"
+    },
+    {
+      "from": "engine",
+      "to": "client",
+      "y": 386,
+      "label": "final vacío is_final",
+      "variant": "emphasis"
+    },
+    {
+      "from": "engine",
+      "to": "client",
+      "y": 424,
+      "label": "trailing metadata x-*",
+      "variant": "return"
+    },
+    {
+      "from": "client",
+      "to": "game",
+      "y": 462,
+      "label": "texto o EngineFailure",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "game",
+      "from": 170,
+      "to": 470,
+      "type": "backend"
+    },
+    {
+      "participant": "client",
+      "from": 172,
+      "to": 468,
+      "type": "backend"
+    },
+    {
+      "participant": "engine",
+      "from": 208,
+      "to": 432,
+      "type": "backend"
+    },
+    {
+      "participant": "hf",
+      "from": 256,
+      "to": 306,
+      "type": "external"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Deadline",
+      "items": [
+        "min(8 s, ventana restante de la ronda)",
+        "Lo impone gRPC en el transporte"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Fallos",
+      "items": [
+        "Timeout, 402 o stream parcial: la partida se revela",
+        "Se marca inválida y sin tasa de detección"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Publicación",
+      "items": [
+        "submit_message normaliza igual que a los humanos",
+        "Mismo límite de palabras para todos"
+      ]
+    }
+  ]
+}

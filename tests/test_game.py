@@ -432,3 +432,164 @@ def test_no_deadline_game_never_expires() -> None:
     game.open_voting()
     game.check_expiration()
     assert game.state == GameState.VOTING
+
+
+# ---------------------------------------------------------------------------
+# Eventos de ciclo de vida (R2-4)
+# ---------------------------------------------------------------------------
+
+
+class Sink:
+    """Sumidero de eventos respaldado por lista para inspeccionar emisiones."""
+
+    def __init__(self) -> None:
+        """Preparar la lista de eventos emitidos por la partida."""
+        self.events: list[tuple[str, dict]] = []
+
+    def __call__(self, event_type: str, payload: dict) -> None:
+        """Registrar una emisión del dominio."""
+        self.events.append((event_type, payload))
+
+
+@pytest.fixture
+def sink() -> Sink:
+    """Sumidero de eventos para verificar el flujo de ciclo de vida."""
+    return Sink()
+
+
+def make_game_with_sink(
+    clock: Clock, *, rounds: int = 1
+) -> tuple[Game, list[str], Sink]:
+    """Preparar tres humanos, una IA y un sumidero de eventos para las pruebas."""
+    sink = Sink()
+    game = Game(rounds=rounds, round_timeout=60.0, clock=clock, event_sink=sink)
+    aliases = [game.add_player() for _ in range(3)]
+    aliases.append(game.add_player(is_ai=True))
+    return game, aliases, sink
+
+
+def test_full_game_event_stream_order(clock: Clock) -> None:
+    """Una partida completa emite el flujo de eventos en orden y una sola vez."""
+    game, aliases, sink = make_game_with_sink(clock, rounds=2)
+    game.start()
+    for current_round in (1, 2):
+        for alias in aliases[:-1]:
+            game.submit_message(alias, "Respuesta de prueba.")
+        game.submit_message(aliases[-1], "Respuesta de la IA.")
+    game.open_voting()
+    for alias in aliases[:3]:
+        game.cast_vote(alias, aliases[3])
+    assert game.state == GameState.REVEAL
+    assert sink.events == [
+        ("game.started", {"rounds": 2, "max_words": 15}),
+        ("round.started", {"round_number": 1}),
+        ("round.completed", {"round_number": 1}),
+        ("round.started", {"round_number": 2}),
+        ("round.completed", {"round_number": 2}),
+        (
+            "game.closed",
+            {
+                "reason": "completed",
+                "valid_game": True,
+                "tasa_deteccion": 1.0,
+                "rounds": 2,
+            },
+        ),
+    ]
+    event_types = [event_type for event_type, _ in sink.events]
+    assert event_types.count("game.started") == 1
+    assert event_types.count("game.closed") == 1
+
+
+def test_close_events_are_exactly_once_under_repeated_ticks(clock: Clock) -> None:
+    """Los ticks repetidos tras la revelación no duplican eventos de cierre."""
+    game, aliases, sink = make_game_with_sink(clock)
+    game.start()
+    for alias in aliases:
+        game.submit_message(alias, "Una respuesta de prueba.")
+    game.open_voting()
+    for alias in aliases[:3]:
+        game.cast_vote(alias, aliases[3])
+    assert game.state == GameState.REVEAL
+    before = len(sink.events)
+    for _ in range(5):
+        game.check_expiration()
+    assert len(sink.events) == before
+    assert [event_type for event_type, _ in sink.events].count("game.closed") == 1
+
+
+def test_close_reason_mapping(clock: Clock) -> None:
+    """El motivo del cierre distingue interrupción, votación completa y vencimiento."""
+    # Interrupción técnica: el motivo es el código de interrupción y la partida es inválida.
+    game, aliases, sink = make_game_with_sink(clock)
+    game.start()
+    game.interrupt("engine_unavailable")
+    assert game.state == GameState.REVEAL
+    assert sink.events[-1][0] == "game.closed"
+    assert sink.events[-1][1] == {
+        "reason": "engine_unavailable",
+        "valid_game": False,
+        "tasa_deteccion": None,
+        "rounds": 1,
+    }
+
+    # Votación completa: motivo "completed", partida válida.
+    game, aliases, sink = make_game_with_sink(clock)
+    game.start()
+    for alias in aliases:
+        game.submit_message(alias, "Una respuesta de prueba.")
+    game.open_voting()
+    for alias in aliases[:3]:
+        game.cast_vote(alias, aliases[3])
+    assert game.state == GameState.REVEAL
+    assert sink.events[-1][0] == "game.closed"
+    assert set(sink.events[-1][1]) == {
+        "reason",
+        "valid_game",
+        "tasa_deteccion",
+        "rounds",
+    }
+    assert sink.events[-1][1]["reason"] == "completed"
+    assert sink.events[-1][1]["valid_game"] is True
+    assert sink.events[-1][1]["tasa_deteccion"] == pytest.approx(1.0)
+
+    # Vencimiento de votación con quorum: motivo "voting_timeout", partida válida.
+    game, aliases, sink = make_game_with_sink(clock)
+    game.start()
+    for alias in aliases:
+        game.submit_message(alias, "Una respuesta de prueba.")
+    game.open_voting()
+    game.cast_vote(aliases[0], aliases[3])
+    game.cast_vote(aliases[1], aliases[2])
+    clock.advance(60.0)
+    game.check_expiration()
+    assert game.state == GameState.REVEAL
+    assert sink.events[-1][0] == "game.closed"
+    assert set(sink.events[-1][1]) == {
+        "reason",
+        "valid_game",
+        "tasa_deteccion",
+        "rounds",
+    }
+    assert sink.events[-1][1]["reason"] == "voting_timeout"
+    assert sink.events[-1][1]["valid_game"] is True
+    assert sink.events[-1][1]["tasa_deteccion"] == pytest.approx(0.5)
+
+
+def test_sink_is_optional(clock: Clock) -> None:
+    """Sin sumidero la partida no gestiona eventos y mantiene idéntico comportamiento."""
+    game, aliases = open_voting_with_clock(clock)
+    impostor = aliases[3]
+    game.cast_vote(aliases[0], impostor)
+    game.cast_vote(aliases[1], aliases[2])
+    game.cast_vote(aliases[2], aliases[1])
+    assert game.event_sink is None
+    result = game.public_state()["result"]
+    assert game.state == GameState.REVEAL
+    assert result["valid_game"] is True
+    assert result["interruption_reason"] is None
+    assert result["votes"] == {
+        aliases[0]: impostor,
+        aliases[1]: aliases[2],
+        aliases[2]: aliases[1],
+    }

@@ -118,6 +118,32 @@ class RunParams:
     n_rondas: int
 
 
+def _log_tags(
+    mlflow: ModuleType, params: RunParams, result: Mapping[str, object]
+) -> None:
+    """Registrar tags de trazabilidad del run (M3: licencia, equipo, ambiente).
+
+    Los valores provienen de variables de entorno con default honesto; nunca
+    se inventan identificadores de PR.
+    """
+    tags = {
+        "licencia": os.environ.get("SOSPECHAI_LICENCIA", "MIT"),
+        "equipo": os.environ.get("SOSPECHAI_EQUIPO", "GRUPO 2"),
+        "ambiente": os.environ.get("SOSPECHAI_ENV", "local"),
+        "modulo": "M3",
+        "modelo_preentrenado": params.model_id,
+        "engine_backend": params.engine_backend,
+        "provider": params.provider,
+    }
+    pr = os.environ.get("SOSPECHAI_PR", "")
+    if pr:
+        tags["pr_asociada"] = pr
+    if result.get("game_id"):
+        tags["partida"] = str(result["game_id"])
+    for name, value in tags.items():
+        mlflow.set_tag(name, value)
+
+
 def log_game_run(
     *,
     params: RunParams,
@@ -143,6 +169,7 @@ def log_game_run(
     try:
         for name, value in asdict(params).items():
             mlflow.log_param(name, value)
+        _log_tags(mlflow, params, result)
         _log_metrics(mlflow, result, usage, pricing)
         _log_artifacts(mlflow, result)
         return run.info.run_id

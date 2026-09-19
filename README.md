@@ -1,16 +1,30 @@
 # SospechAI
 
+[![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![uv](https://img.shields.io/badge/uv-ambiente_100%25-7B3FF2?logo=uv)](https://docs.astral.sh/uv/)
+[![Tests](https://img.shields.io/badge/tests-426_passing-2ea44f)](https://github.com/uao-neumonia-loscracks/sospechAI)
+[![Ruff](https://img.shields.io/badge/ruff-clean-D7FF64?logo=ruff)](https://github.com/astral-sh/ruff)
+[![Black](https://img.shields.io/badge/black-formatted-000000?logo=black)](https://black.readthedocs.io/)
+[![Docker](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![MLflow](https://img.shields.io/badge/MLflow-tracking-0194E2?logo=mlflow&logoColor=white)](https://mlflow.org/)
+[![Licencia](https://img.shields.io/badge/licencia-MIT-yellow)](#licencia)
+
 Juego de conversación multijugador para medir la detección humana de texto generado por inteligencia artificial. En cada partida, humanos y una IA impostora responden las mismas preguntas de ronda con un límite de palabras, debaten, votan a quién consideran el impostor y la partida termina con la revelación de la identidad real de la IA: puntajes y tasa de detección del grupo.
 
 El modelo no se ejecuta en local: la generación de texto sale por HTTP hacia la Inference API de Hugging Face (router a un proveedor externo, hoy Featherless AI) desde el servicio `impostor-engine` (ver ADR-001).
 
 ## Arquitectura
 
+[![Diagrama de infraestructura](docs/arquitectura.html)](docs/arquitectura.html) · [![Secuencia de una respuesta del impostor](docs/arquitectura-secuencia.html)](docs/arquitectura-secuencia.html)
+
+Diagramas interactivos generados con la skill [Archify](https://skills.sh/tt-a1i/archify): el de infraestructura muestra servicios, contrato gRPC, Inference API, SQLite y MLflow; el de secuencia muestra la ruta de una respuesta del impostor hasta el chunk final con trailing metadata. Las fuentes JSON viven en `docs/diagramas/` y se regeneran según `docs/diagramas/README.md`.
+
 | Componente | Rol | Puerto |
 | --- | --- | --- |
 | `impostor-engine` | Servicio gRPC que genera las respuestas del impostor llamando a la Inference API de Hugging Face. No conoce rondas, votos, jugadores ni partidas. | 50051 (solo red interna) |
 | `impostor-orchestrator` | Servidor HTTP del contrato UI-orquestador: reglas del juego, rondas, votos, revelación y cierre. Persistencia opcional de eventos en SQLite y tracking MLflow. | 8080 |
-| `impostor-ui` | Frontend Streamlit. Habla únicamente con el orquestador. | 8501 (único puerto expuesto al host) |
+| `impostor-mlflow` | Servidor de tracking MLflow: cada partida terminada registra un run con params, métricas, artefactos y tags. | 5000 |
+| `impostor-ui` | Frontend Streamlit. Habla únicamente con el orquestador. | 8501 (único puerto expuesto al host junto a MLflow) |
 
 Reglas de acoplamiento (ver `AGENTS.md`):
 
@@ -96,7 +110,9 @@ uv run pytest -q
 uv run python scripts/validate_proto.py
 ```
 
-Estado verificado el 18 de septiembre de 2026: 416 pruebas, todas en verde y sin warnings (pytest corre con `filterwarnings` en modo error); ruff y black sin hallazgos; el `.proto` compila. Las pruebas nunca llaman a la API real de Hugging Face.
+Estado verificado el 19 de septiembre de 2026: 426 pruebas, todas en verde y sin warnings (pytest corre con `filterwarnings` en modo error); ruff y black sin hallazgos; el `.proto` compila. Las pruebas nunca llaman a la API real de Hugging Face.
+
+El tracking con MLflow registra un run por partida terminada cuando `MLFLOW_TRACKING_URI` está definida (en el compose del M3, `http://mlflow:5000`): params (modelo, proveedor, temperatura, max_words, jugadores, rondas), métricas (tasa de detección, latencia p95, tokens, costo estimado), artefactos (transcript anónimo y matriz de votos) y tags de trazabilidad (licencia, equipo, ambiente, módulo).
 
 ## Documentación
 

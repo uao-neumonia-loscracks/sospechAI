@@ -49,12 +49,33 @@ services:
     depends_on:
       impostor-engine:
         condition: service_healthy
+      mlflow:
+        condition: service_started
     environment:
       SOSPECHAI_MODEL_ID: ${SOSPECHAI_MODEL_ID:?Definí SOSPECHAI_MODEL_ID en .env (ver .env.example)}
       SOSPECHAI_ENGINE_ADDR: impostor-engine:50051
       SOSPECHAI_EVENTS_DB: /app/data/game_events.sqlite3
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
       - sqlite-data:/app/data
+    networks:
+      - sospechai-net
+    restart: unless-stopped
+
+  # MLflow: UI de tracking en vivo para la sustentación M3. Puerto 5000
+  # expuesto al host para mostrar params/métricas/artefactos/tags del run.
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: impostor-mlflow
+    command: uv run --no-sync mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////app/mlruns/mlflow.db --artifacts-destination /app/mlruns/artifacts
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/app/mlruns
     networks:
       - sospechai-net
     restart: unless-stopped
@@ -83,3 +104,5 @@ networks:
 volumes:
   sqlite-data:
     # Persiste la base local del orquestador entre ciclos de contenedores.
+  mlflow-data:
+    # Persiste los runs de MLflow (backend + artefactos) entre ciclos.

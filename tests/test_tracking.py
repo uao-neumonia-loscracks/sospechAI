@@ -294,6 +294,26 @@ def test_log_game_run_without_usage_omits_usage_metrics(tmp_path, monkeypatch) -
     assert "costo_estimado" not in metrics
 
 
+def test_log_game_run_records_traceability_tags(tmp_path, monkeypatch) -> None:
+    """El run registra tags de trazabilidad M3: licencia, equipo, ambiente y PR."""
+    # Arrange
+    monkeypatch.setenv("MLFLOW_ALLOW_FILE_STORE", "true")
+    monkeypatch.setenv("SOSPECHAI_PR", "PR-70")
+    tracking_uri = f"file:{(tmp_path / 'mlruns').as_posix()}"
+    # Act
+    run_id = log_game_run(
+        params=_params(), result=_result(), usage=_usage(), tracking_uri=tracking_uri
+    )
+    tags = MlflowClient(tracking_uri=tracking_uri).get_run(run_id).data.tags
+    # Assert
+    assert tags["licencia"] == "MIT"
+    assert tags["equipo"] == "GRUPO 2"
+    assert tags["ambiente"] == "local"
+    assert tags["modulo"] == "M3"
+    assert tags["modelo_preentrenado"] == "Qwen/Qwen2.5-7B-Instruct"
+    assert tags["pr_asociada"] == "PR-70"
+
+
 def test_log_game_run_invalid_game_omits_tasa_deteccion(tmp_path, monkeypatch) -> None:
     """Una partida interrumpida no publica tasa_deteccion."""
     # Arrange

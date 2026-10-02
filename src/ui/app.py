@@ -129,6 +129,7 @@ def main() -> None:
         render_revelation,
         render_voting,
     )
+    from src.ui.version_banner import render_version_banner
 
     state = st.session_state
     for key in SESSION_KEYS:
@@ -178,6 +179,8 @@ def main() -> None:
                 st.rerun()
 
         poll_snapshot()
+
+    render_version_banner()
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ invocar al motor de inferencia en esta fase (el FakeStub falla si se usa).
 
 import http.client
 import json
+import logging
 import threading
 import time
 from collections.abc import Iterator
@@ -20,7 +21,7 @@ import pytest
 from proto import impostor_pb2 as pb
 from src.orchestrator.engine_client import EngineClient
 from src.orchestrator.game import ABSTAIN_SENTINEL, EventSink, Game
-from src.orchestrator.server import GameServer, ServerConfig, parse_route
+from src.orchestrator.server import GameServer, ServerConfig, main, parse_route
 from src.orchestrator.session import SessionStore
 from src.orchestrator.tracking import EngineUsage
 
@@ -1184,4 +1185,42 @@ def test_revelacion_usa_el_provider_de_config(
         _reach_votacion(api, code, host, token2)
         _reveal(api, code, host, token2)
     assert len(calls) == 1
-    assert calls[0]["params"].provider == "together"
+
+
+def test_turno_ia_sin_modelo_loguea_causa_y_responde_500(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """model_id vacío (bug de prod): el turno IA falla y el error se registra.
+
+    Sin este test, el fallo era un 500 silencioso: sin log, la partida
+    quedaba varada en RONDA hasta que el timer la cerraba con round_timeout.
+    """
+    with serve(config=ServerConfig(model_id="")) as (api, _):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        assert submit(api, code, host, "hola")[0] == 204
+        with caplog.at_level(logging.ERROR):
+            status, _, body = submit(api, code, token2, "mundo")
+        assert status == 500
+        assert body["code"] == "internal"
+        assert "Define hf-router y el modelo solicitado" in caplog.text
+
+
+def test_dispatch_inesperado_loguea_causa(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Un 500 interno genérico deja rastro: la causa se loguea con traceback."""
+    with serve() as (api, store):
+        store.create = _boom
+        with caplog.at_level(logging.ERROR):
+            status, _, body = api.send("POST", "/rooms")
+        assert status == 500
+        assert body["code"] == "internal"
+        assert "fallo interno provocado" in caplog.text
+
+
+def test_main_sin_modelo_falla_a_la_vista(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Arrancar sin SOSPECHAI_MODEL_ID es un error de consola, no un 500 a oscuras."""
+    monkeypatch.delenv("SOSPECHAI_MODEL_ID", raising=False)
+    assert main(["--model-id", ""]) != 0

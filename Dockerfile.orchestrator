@@ -17,8 +17,12 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY proto ./proto
 COPY src ./src
 
-# Directorio de la base de eventos de práctica (volumen sqlite-data).
-RUN mkdir -p /app/data
+# Usuario sin privilegios para producción.
+RUN useradd --create-home --shell /bin/bash app \
+    && mkdir -p /app/data /app/mlruns \
+    && chown -R app:app /app
+
+USER app
 
 EXPOSE 8080
 

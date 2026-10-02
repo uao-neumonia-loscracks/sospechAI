@@ -25,6 +25,8 @@ def version_label(environ: dict[str, str] | None = None) -> str:
 def render_version_banner() -> None:
     """Dibujar el pie con el texto fijo y la versión desplegada."""
 
+    # Validacion A30: tocar src/ reconstruye solo la capa COPY src; el venv
+    # (uv sync) sale del cache del runner y no se vuelve a compilar.
     import streamlit as st
 
     st.markdown(f"{BANNER_TEXT} — versión {version_label()}")

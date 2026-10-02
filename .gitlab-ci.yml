@@ -1,0 +1,49 @@
+stages:
+  - test
+  - build
+  - deploy
+
+default:
+  tags: [droplet]
+
+test:
+  stage: test
+  script:
+    # Las pruebas corren en un contenedor con Python 3.13 y uv, para no
+    # instalar nada en el Droplet. Se corre con el usuario del runner
+    # para que los archivos generados no queden con dueno root.
+    - >
+      docker run --rm
+      --user "$(id -u):$(id -g)"
+      -e HOME=/tmp
+      -e UV_CACHE_DIR=/uv-cache
+      -v /opt/uv-cache:/uv-cache
+      -v "$CI_PROJECT_DIR":/app
+      -w /app
+      ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+      sh -c "uv sync --locked
+      && uv run ruff check src tests scripts
+      && uv run black --check src tests scripts
+      && uv run pytest -q"
+
+build:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -f Dockerfile              -t "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_SHORT_SHA" .
+    - docker build -f Dockerfile.orchestrator -t "$CI_REGISTRY_IMAGE/orchestrator:$CI_COMMIT_SHORT_SHA" .
+    - docker build -f Dockerfile.ui           -t "$CI_REGISTRY_IMAGE/ui:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_SHORT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE/orchestrator:$CI_COMMIT_SHORT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE/ui:$CI_COMMIT_SHORT_SHA"
+
+deploy:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  environment:
+    name: production
+  script:
+    - bash scripts/deploy.sh

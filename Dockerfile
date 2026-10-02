@@ -9,18 +9,20 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1
 
+# Usuario sin privilegios ANTES de copiar: los COPY usan --chown y el venv
+# queda solo-lectura en runtime, asi un cambio de src invalida pocos KB
+# y no re-empaqueta el venv entero (era el cuello de botella del build).
+RUN useradd --create-home --shell /bin/bash app \
+    && mkdir -p /app/data /app/mlruns \
+    && chown app:app /app/data /app/mlruns
+
 # Primero las dependencias congeladas (mejor caché de capas).
-COPY pyproject.toml uv.lock ./
+COPY --chown=app:app pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Después el código y el contrato.
-COPY proto ./proto
-COPY src ./src
-
-# Usuario sin privilegios para producción.
-RUN useradd --create-home --shell /bin/bash app \
-    && mkdir -p /app/data /app/mlruns \
-    && chown -R app:app /app
+COPY --chown=app:app proto ./proto
+COPY --chown=app:app src ./src
 
 USER app
 

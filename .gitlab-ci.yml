@@ -32,12 +32,16 @@ build:
     - if: $CI_COMMIT_BRANCH == "main"
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    # Las tres imagenes se construyen en paralelo dentro del mismo job:
+    # el runner del droplet es unico, asi que jobs separados se serializarian.
     # --push integra build+push y --provenance=false --sbom=false evita el
     # "blob unknown to registry" que producian las attestations de BuildKit
     # al pushear manifest list con docker push separado.
-    - docker buildx build --push --provenance=false --sbom=false -f Dockerfile              -t "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_SHORT_SHA" .
-    - docker buildx build --push --provenance=false --sbom=false -f Dockerfile.orchestrator -t "$CI_REGISTRY_IMAGE/orchestrator:$CI_COMMIT_SHORT_SHA" .
-    - docker buildx build --push --provenance=false --sbom=false -f Dockerfile.ui           -t "$CI_REGISTRY_IMAGE/ui:$CI_COMMIT_SHORT_SHA" .
+    - |
+      docker buildx build --push --provenance=false --sbom=false -f Dockerfile              -t "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_SHORT_SHA" . & p1=$!
+      docker buildx build --push --provenance=false --sbom=false -f Dockerfile.orchestrator -t "$CI_REGISTRY_IMAGE/orchestrator:$CI_COMMIT_SHORT_SHA" . & p2=$!
+      docker buildx build --push --provenance=false --sbom=false -f Dockerfile.ui           -t "$CI_REGISTRY_IMAGE/ui:$CI_COMMIT_SHORT_SHA" . & p3=$!
+      wait "$p1" && wait "$p2" && wait "$p3"
 
 deploy:
   stage: deploy

@@ -10,7 +10,7 @@ services:
 
   orchestrator:
     image: ${CI_REGISTRY_IMAGE}/orchestrator:${IMAGE_TAG}
-    command: ["uv", "run", "--no-sync", "python", "-m", "src.orchestrator.server", "--round-timeout", "90"]
+    command: ["uv", "run", "--no-sync", "python", "-m", "src.orchestrator.server", "--round-timeout", "180"]
     environment:
       SOSPECHAI_ENGINE_ADDR: engine:50051
       SOSPECHAI_EVENTS_DB: /app/data/game_events.sqlite3

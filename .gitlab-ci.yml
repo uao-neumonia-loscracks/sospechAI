@@ -32,12 +32,12 @@ build:
     - if: $CI_COMMIT_BRANCH == "main"
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-    - docker build -f Dockerfile              -t "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_SHORT_SHA" .
-    - docker build -f Dockerfile.orchestrator -t "$CI_REGISTRY_IMAGE/orchestrator:$CI_COMMIT_SHORT_SHA" .
-    - docker build -f Dockerfile.ui           -t "$CI_REGISTRY_IMAGE/ui:$CI_COMMIT_SHORT_SHA" .
-    - docker push "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_SHORT_SHA"
-    - docker push "$CI_REGISTRY_IMAGE/orchestrator:$CI_COMMIT_SHORT_SHA"
-    - docker push "$CI_REGISTRY_IMAGE/ui:$CI_COMMIT_SHORT_SHA"
+    # --push integra build+push y --provenance=false --sbom=false evita el
+    # "blob unknown to registry" que producian las attestations de BuildKit
+    # al pushear manifest list con docker push separado.
+    - docker buildx build --push --provenance=false --sbom=false -f Dockerfile              -t "$CI_REGISTRY_IMAGE/engine:$CI_COMMIT_SHORT_SHA" .
+    - docker buildx build --push --provenance=false --sbom=false -f Dockerfile.orchestrator -t "$CI_REGISTRY_IMAGE/orchestrator:$CI_COMMIT_SHORT_SHA" .
+    - docker buildx build --push --provenance=false --sbom=false -f Dockerfile.ui           -t "$CI_REGISTRY_IMAGE/ui:$CI_COMMIT_SHORT_SHA" .
 
 deploy:
   stage: deploy

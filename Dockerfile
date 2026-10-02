@@ -17,6 +17,13 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY proto ./proto
 COPY src ./src
 
+# Usuario sin privilegios para producción.
+RUN useradd --create-home --shell /bin/bash app \
+    && mkdir -p /app/data /app/mlruns \
+    && chown -R app:app /app
+
+USER app
+
 EXPOSE 50051
 
 # Entrypoint real del engine (módulo "serve", no "server").

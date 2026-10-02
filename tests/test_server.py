@@ -19,9 +19,10 @@ import pytest
 
 from proto import impostor_pb2 as pb
 from src.orchestrator.engine_client import EngineClient
-from src.orchestrator.game import Game
+from src.orchestrator.game import ABSTAIN_SENTINEL, EventSink, Game
 from src.orchestrator.server import GameServer, ServerConfig, parse_route
 from src.orchestrator.session import SessionStore
+from src.orchestrator.tracking import EngineUsage
 
 SECRET_MARKERS = (
     b"is_ai",
@@ -50,6 +51,49 @@ class Stub:
 
 
 MODEL_ID = "test/model:provider"
+
+USAGE_METADATA = [
+    ("x-usage-prompt-tokens", "120"),
+    ("x-usage-completion-tokens", "45"),
+    ("x-latency-total-ms", "123.4"),
+    ("x-attempts", "1"),
+    ("x-character-break", "0"),
+    ("x-model-id", MODEL_ID),
+]
+
+
+class MetadataCall:
+    """Llamada gRPC simulada con trailing metadata del contrato de uso."""
+
+    def __init__(self, metadata: list[tuple[str, str]]) -> None:
+        """Guardar los pares que el engine reportaría al cerrar el stream."""
+        self.metadata = metadata
+
+    def __iter__(self) -> Iterator[pb.UtteranceChunk]:
+        """Entregar una respuesta válida y su cierre final explícito."""
+        yield pb.UtteranceChunk(text_delta="Un café.")
+        yield pb.UtteranceChunk(is_final=True)
+
+    def trailing_metadata(self) -> list[tuple[str, str]]:
+        """Devolver la metadata configurada para esta llamada."""
+        return self.metadata
+
+    def cancel(self) -> None:
+        """No hay recursos que liberar en este doble."""
+
+
+class MetadataStub:
+    """Doble del engine que reporta trailing metadata en cada turno de IA."""
+
+    def __init__(self, metadata: list[tuple[str, str]] = USAGE_METADATA) -> None:
+        """Guardar la metadata que devolverá cada llamada de generación."""
+        self.metadata = metadata
+        self.calls = 0
+
+    def GenerateUtterance(self, request: Any, *, timeout: float) -> MetadataCall:
+        """Registrar la llamada y devolver un stream con metadata."""
+        self.calls += 1
+        return MetadataCall(self.metadata)
 
 
 @dataclass
@@ -117,17 +161,23 @@ def serve(
     game_factory: Any = None,
     client: Any = None,
     clock: Any = time.monotonic,
+    config: ServerConfig | None = None,
+    event_sink_factory: Any = None,
 ) -> Iterator[tuple[Api, SessionStore]]:
     """Abrir un GameServer real en loopback con puerto efímero y cerrarlo."""
     store = store or SessionStore()
     factory = game_factory or (lambda: Game(rounds=1, round_timeout=None, clock=clock))
+    sink_options = {}
+    if event_sink_factory is not None:
+        sink_options["event_sink_factory"] = event_sink_factory
     server = GameServer(
         ("127.0.0.1", 0),
         store,
         client or EngineClient(Stub()),
-        config=ServerConfig(model_id=MODEL_ID),
+        config=config or ServerConfig(model_id=MODEL_ID),
         game_factory=factory,
         clock=clock,
+        **sink_options,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -816,3 +866,322 @@ def test_error_catalog_rows(
     """Cada fila del catálogo se provoca por HTTP: status, code y mensaje exactos."""
     with serve() as (api, store):
         assert act(api, store) == expected
+
+
+# ---------------------------------------------------------------------------
+# Abstención explícita (sentinel) y ventanas de fase
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_abstention_over_http_returns_204_with_null_vote() -> None:
+    """El sentinel ``__abstain__`` registra un voto nulo y cierra la partida."""
+    with serve() as (api, store):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        assert_204(
+            api.send(
+                "POST",
+                f"/rooms/{code}/votes",
+                payload={"suspect": ABSTAIN_SENTINEL},
+                token=host,
+            )
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "VOTACION"
+        assert snapshot["votes_received"] == 1
+        assert "result" not in snapshot
+        assert_204(
+            api.send(
+                "POST",
+                f"/rooms/{code}/votes",
+                payload={"suspect": "Jugador 3"},
+                token=token2,
+            )
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+        result = snapshot["result"]
+        assert result["valid_game"] is True
+        assert result["votes"] == {"Jugador 1": None, "Jugador 2": "Jugador 3"}
+        assert result["vote_counts"] == {"Jugador 3": 1}
+        assert result["tasa_deteccion"] == 1.0
+
+
+def test_abstain_sentinel_outside_voting_is_wrong_state() -> None:
+    """El sentinel fuera de VOTACION obedece la máquina de estados normal."""
+    with serve() as (api, store):
+        code, host, _ = open_room(api)
+        join_room(api, code)
+        start_room(api, code, host)
+        status, _, body = api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": ABSTAIN_SENTINEL},
+            token=host,
+        )
+        assert (status, body["code"]) == (409, "wrong_state")
+        assert (
+            body["message"]
+            == "Esta acción requiere VOTACION; la partida está en RONDA."
+        )
+
+
+def test_abstention_path_leaks_nothing_before_revelacion() -> None:
+    """Una abstención no adelanta votos ni claves ocultas antes de REVELACION."""
+    with serve() as (api, store):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        assert (
+            api.send(
+                "POST",
+                f"/rooms/{code}/votes",
+                payload={"suspect": ABSTAIN_SENTINEL},
+                token=host,
+            )[0]
+            == 204
+        )
+        status, headers, raw = api.raw("GET", f"/rooms/{code}/state", token=host)
+        assert status == 200
+        assert_secrets_absent(headers, raw)
+        snapshot = json.loads(raw)
+        assert snapshot["votes_received"] == 1
+        assert "votes" not in snapshot
+        assert "result" not in snapshot
+
+
+def test_remaining_seconds_tracks_current_timed_phase() -> None:
+    """``remaining_seconds`` es numérico en fases con ventana y null en el resto."""
+
+    def factory() -> Game:
+        return Game(rounds=1, round_timeout=60.0)
+
+    with serve(game_factory=factory) as (api, store):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        assert state(api, code, host)["remaining_seconds"] is None
+        start_room(api, code, host)
+        ronda = state(api, code, host)
+        assert ronda["remaining_seconds"] is not None
+        assert ronda["remaining_seconds"] > 0
+        assert submit(api, code, host, "primera respuesta")[0] == 204
+        assert submit(api, code, token2, "segunda respuesta")[0] == 204
+        discusion = state(api, code, host)
+        assert discusion["remaining_seconds"] is not None
+        assert discusion["remaining_seconds"] > 0
+        assert api.send("POST", f"/rooms/{code}/voting/open", token=host)[0] == 204
+        votacion = state(api, code, host)
+        assert votacion["remaining_seconds"] is not None
+        assert votacion["remaining_seconds"] > 0
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=host,
+        )
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=token2,
+        )
+        revelacion = state(api, code, host)
+        assert revelacion["state"] == "REVELACION"
+        assert revelacion["remaining_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# Wiring del sumidero de eventos (R2-4)
+# ---------------------------------------------------------------------------
+
+
+class EventRecorder:
+    """Sumidero de eventos por sala para verificar el wiring del servidor."""
+
+    def __init__(self) -> None:
+        """Comenzar sin eventos registrados."""
+        self.events: list[tuple[str, str, dict]] = []
+
+    def sink_for(self, code: str) -> EventSink:
+        """Construir el sumidero ligado al código de sala emitido."""
+
+        def sink(event_type: str, payload: dict) -> None:
+            self.events.append((code, event_type, payload))
+
+        return sink
+
+
+def test_new_games_receive_the_event_sink() -> None:
+    """Toda sala creada recibe el sumidero y emite el flujo ligado a su código."""
+    recorder = EventRecorder()
+    with serve(event_sink_factory=recorder.sink_for) as (api, store):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=host,
+        )
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=token2,
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+    assert [event[1] for event in recorder.events] == [
+        "game.started",
+        "round.started",
+        "round.completed",
+        "game.closed",
+    ]
+    assert [event[0] for event in recorder.events] == [code] * 4
+    assert recorder.events[-1][2]["reason"] == "completed"
+
+
+def test_server_without_sink_behaves_unchanged() -> None:
+    """Sin fábrica de sumideros el servidor no gestiona eventos y sigue igual."""
+    with serve() as (api, store):
+        code, host, _ = open_room(api)
+        assert store.room(code).game.event_sink is None
+        token2, _ = join_room(api, code)
+        assert store.room(code).game.event_sink is None
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=host,
+        )
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=token2,
+        )
+        snapshot = state(api, code, host)
+        assert snapshot["state"] == "REVELACION"
+        assert snapshot["result"]["valid_game"] is True
+
+
+# ---------------------------------------------------------------------------
+# Cierre de partida y tracking (A13): log_game_run exactamente una vez
+# ---------------------------------------------------------------------------
+
+
+def _reveal(api: Api, code: str, host: str, token2: str) -> None:
+    """Cerrar la votación con dos votos para llegar a REVELACION."""
+    assert (
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=host,
+        )[0]
+        == 204
+    )
+    assert (
+        api.send(
+            "POST",
+            f"/rooms/{code}/votes",
+            payload={"suspect": "Jugador 3"},
+            token=token2,
+        )[0]
+        == 204
+    )
+
+
+def test_revelacion_logs_game_run_once_with_accumulated_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La partida terminal genera un único run con el uso acumulado del engine."""
+    calls: list[dict[str, object]] = []
+
+    def fake_log_game_run(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr("src.orchestrator.server.log_game_run", fake_log_game_run)
+    with serve(client=EngineClient(MetadataStub())) as (api, _):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        _reveal(api, code, host, token2)
+        assert state(api, code, host)["state"] == "REVELACION"
+        assert state(api, code, host)["state"] == "REVELACION"  # poll repetido
+    assert len(calls) == 1
+    params, result, usage = calls[0]["params"], calls[0]["result"], calls[0]["usage"]
+    assert params.model_id == MODEL_ID
+    assert params.engine_backend == "hf-router"
+    assert params.provider == "featherless-ai"
+    assert params.temperature == pytest.approx(0.9)
+    assert params.top_p == pytest.approx(0.9)
+    assert params.system_prompt_version == "v2"
+    assert params.max_words == 15
+    assert params.n_players == 3
+    assert params.n_rondas == 1
+    assert result["state"] == "REVELACION"
+    assert result["valid_game"] is True
+    assert usage == EngineUsage(
+        prompt_tokens=120,
+        completion_tokens=45,
+        cached_tokens=0,
+        latencies_ms=(123.4,),
+        attempts=1,
+        character_breaks=0,
+        calls=1,
+        model_id=MODEL_ID,
+    )
+
+
+def test_malformed_usage_metadata_logs_error_and_skips_usage(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Metadata malformada no contamina el run: log claro y usage omitido."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "src.orchestrator.server.log_game_run",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    malformed = [("x-usage-prompt-tokens", "no-entero"), ("x-model-id", MODEL_ID)]
+    with serve(client=EngineClient(MetadataStub(metadata=malformed))) as (api, _):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        _reveal(api, code, host, token2)
+        assert state(api, code, host)["state"] == "REVELACION"
+    assert len(calls) == 1
+    assert calls[0]["usage"] is None
+    assert calls[0]["result"]["valid_game"] is True
+    assert "Metadata de uso malformada" in caplog.text
+
+
+def test_revelacion_usa_el_provider_de_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El proveedor registrado sale de ServerConfig, no de una constante."""
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "src.orchestrator.server.log_game_run",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    with serve(
+        client=EngineClient(MetadataStub()),
+        config=ServerConfig(model_id=MODEL_ID, provider="together"),
+    ) as (api, _):
+        code, host, _ = open_room(api)
+        token2, _ = join_room(api, code)
+        start_room(api, code, host)
+        _reach_votacion(api, code, host, token2)
+        _reveal(api, code, host, token2)
+    assert len(calls) == 1
+    assert calls[0]["params"].provider == "together"

@@ -14,12 +14,13 @@ IDLE_POLL_SECONDS = 2.5
 
 
 class Screen(StrEnum):
-    """Pantallas del esqueleto navegable R3-1 (UIF-09)."""
+    """Pantallas del flujo de partida (UIF-09); REVELACION es terminal (UIF-16)."""
 
     CONSENT = "consent"
     LOBBY = "lobby"
     CHAT = "chat"
     VOTING = "voting"
+    REVELATION = "revelation"
 
 
 def resolve_screen(*, consent_agreed: bool, state: str | None) -> Screen:
@@ -34,6 +35,8 @@ def resolve_screen(*, consent_agreed: bool, state: str | None) -> Screen:
         return Screen.LOBBY
     if state in ("RONDA", "DISCUSION"):
         return Screen.CHAT
+    if state == "REVELACION":
+        return Screen.REVELATION
     return Screen.VOTING
 
 
@@ -42,3 +45,8 @@ def poll_interval_seconds(state: str | None) -> float:
     if state in GAME_STATES:
         return GAME_POLL_SECONDS
     return IDLE_POLL_SECONDS
+
+
+def mostrar_open_voting(state: str | None, alias: str) -> bool:
+    """True solo para el anfitrión en DISCUSION (UIV-01)."""
+    return state == "DISCUSION" and alias == "Jugador 1"

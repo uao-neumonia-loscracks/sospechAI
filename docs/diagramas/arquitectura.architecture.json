@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SospechAI: arquitectura de servicios",
+    "output": "../arquitectura.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/uao-neumonia-loscracks/sospechAI",
+      "provider": "github",
+      "revision": "6d553ee26f57f63da2fed75293064a4bb7141bee"
+    },
+    "views": [
+      {
+        "id": "ruta-impostor",
+        "label": "Ruta del impostor",
+        "focus": [
+          "orchestrator",
+          "engine",
+          "hf"
+        ],
+        "note": "El orquestador pide por el contrato gRPC; solo el engine conoce HTTP, el proveedor y HF_TOKEN."
+      },
+      {
+        "id": "ruta-jugador",
+        "label": "Ruta del jugador",
+        "focus": [
+          "player",
+          "ui",
+          "orchestrator"
+        ],
+        "note": "La UI habla solo con el orquestador, por HTTP + JSON con polling. Nunca con el engine."
+      },
+      {
+        "id": "registro",
+        "label": "Registro y experimento",
+        "focus": [
+          "orchestrator",
+          "sqlite",
+          "mlflow"
+        ],
+        "note": "Las partidas cerradas se guardan en SQLite y alimentan un run de MLflow por partida."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "player",
+      "type": "external",
+      "label": "Jugador",
+      "sublabel": "navegador",
+      "pos": [
+        40,
+        150
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "alias, sin datos personales"
+    },
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "impostor-ui",
+      "sublabel": "Streamlit :8080",
+      "pos": [
+        260,
+        150
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/ui/app.py",
+          "label": "app.py"
+        }
+      ]
+    },
+    {
+      "id": "orchestrator",
+      "type": "backend",
+      "label": "impostor-orchestrator",
+      "sublabel": "reglas, rondas, votos",
+      "pos": [
+        490,
+        150
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/orchestrator/game.py",
+          "label": "game.py"
+        },
+        {
+          "path": "src/orchestrator/engine_client.py",
+          "label": "engine_client.py"
+        }
+      ]
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "impostor-engine",
+      "sublabel": "gRPC :50051",
+      "pos": [
+        740,
+        150
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/impostor_engine/servicer.py",
+          "label": "servicer.py"
+        },
+        {
+          "path": "proto/impostor.proto",
+          "label": "impostor.proto"
+        }
+      ]
+    },
+    {
+      "id": "hf",
+      "type": "external",
+      "label": "Inference API",
+      "sublabel": "Hugging Face router",
+      "pos": [
+        980,
+        150
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "HF_TOKEN por entorno"
+    },
+    {
+      "id": "sqlite",
+      "type": "database",
+      "label": "SQLite",
+      "sublabel": "partidas cerradas",
+      "pos": [
+        500,
+        320
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/orchestrator/storage.py",
+          "label": "storage.py"
+        }
+      ]
+    },
+    {
+      "id": "mlflow",
+      "type": "database",
+      "label": "MLflow",
+      "sublabel": "tracking :5000",
+      "pos": [
+        980,
+        320
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "tag": "A13, en construcción"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "docker compose: red interna sospechai-net",
+      "wraps": [
+        "ui",
+        "orchestrator",
+        "engine",
+        "sqlite"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "sin puertos al host",
+      "wraps": [
+        "orchestrator",
+        "engine"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "player-ui",
+      "from": "player",
+      "to": "ui",
+      "label": "HTTP :8080",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ui-orchestrator",
+      "from": "ui",
+      "to": "orchestrator",
+      "label": "HTTP + JSON",
+      "variant": "emphasis"
+    },
+    {
+      "id": "orchestrator-engine",
+      "from": "orchestrator",
+      "to": "engine",
+      "label": "gRPC stream",
+      "variant": "emphasis"
+    },
+    {
+      "id": "engine-hf",
+      "from": "engine",
+      "to": "hf",
+      "label": "HTTPS",
+      "variant": "security"
+    },
+    {
+      "id": "orchestrator-sqlite",
+      "from": "orchestrator",
+      "to": "sqlite",
+      "label": "resultado",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24,
+      "labelDx": -40
+    },
+    {
+      "id": "orchestrator-mlflow",
+      "from": "orchestrator",
+      "to": "mlflow",
+      "label": "métricas",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Contrato",
+      "items": [
+        "proto/impostor.proto congelado: GenerateUtterance (stream) y HealthCheck",
+        "Cierre: chunk final vacío con is_final y trailing metadata x-*"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Acoplamiento",
+      "items": [
+        "El orquestador no importa nada del engine",
+        "El engine no conoce rondas, votos ni jugadores",
+        "La UI nunca habla gRPC"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Exposición",
+      "items": [
+        "Solo el puerto de la UI sale al host",
+        "El gRPC queda en la red interna",
+        "HF_TOKEN solo por variable de entorno"
+      ]
+    }
+  ]
+}

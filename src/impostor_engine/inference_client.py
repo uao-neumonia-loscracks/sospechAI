@@ -18,23 +18,27 @@ from collections.abc import Iterator
 from typing import Protocol
 from urllib import error, request
 
+from src.common.metrics import Pricing, estimated_cost_usd
+
 ROUTER_BASE = "https://router.huggingface.co/v1"
 USER_AGENT = "sospechai-engine/0.1 (curso UAO 2026-2)"
-
-INPUT_PRICE_PER_1M = 0.17
-OUTPUT_PRICE_PER_1M = 0.20
-CACHED_PRICE_PER_1M = 0.136
 
 
 def estimate_cost_usd(
     *, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0
 ) -> float:
-    """Estimar el costo en USD de una llamada según tarifas publicadas."""
-    return (
-        prompt_tokens * INPUT_PRICE_PER_1M
-        + completion_tokens * OUTPUT_PRICE_PER_1M
-        + cached_tokens * CACHED_PRICE_PER_1M
-    ) / 1_000_000
+    """Estimar el costo en USD de una llamada según tarifas publicadas.
+
+    Delega en src.common.metrics, la única fuente de verdad de la fórmula de
+    costo (ADR-006). Las tarifas por defecto de Pricing son las canónicas, por
+    lo que el resultado nunca es None.
+    """
+    return estimated_cost_usd(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+        pricing=Pricing(),
+    )
 
 
 class StreamClient(Protocol):

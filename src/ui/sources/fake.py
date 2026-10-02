@@ -14,6 +14,12 @@ from src.ui.api import ApiError, RoomIdentity, StateSnapshot
 from src.ui.words import normalize_text
 
 ROOM_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+# Preguntas de ronda del contrato §7.1 (espejo de src/orchestrator/game.py,
+# copiadas, nunca importadas): el impostor las conoce y el humano las lee.
+ROUND_PROMPTS = (
+    "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
+    "¿Qué comida escogerías después de una clase larga?",
+)
 SCRIPTED_RESPONSES = (
     (
         "Intentaría compartir internet desde el celular y avisarle al profesor.",
@@ -152,6 +158,24 @@ class FakeSospechAI:
         )
         self._fill_remaining(room)
 
+    def submit_vote(self, room_code: str, session_token: str, suspect: str) -> None:
+        """Registrar el voto humano en VOTACION según el contrato §§6.6/8."""
+        room = self._room(room_code)
+        if room.state != "VOTACION":
+            raise ApiError("wrong_state", 409, "Los votos solo se emiten en votación.")
+        alias = self._alias_for(room, session_token)
+        if room.players[alias].is_ai:
+            raise ApiError("ai_cannot_vote", 403, "La IA no vota.")
+        if suspect not in room.players:
+            raise ApiError(
+                "not_a_player", 403, "El sospechoso no es jugador de la sala."
+            )
+        if suspect == alias:
+            raise ApiError("self_vote", 400, "No puedes votar por ti mismo.")
+        if alias in room.votes:
+            raise ApiError("duplicate_vote", 409, "Ya emitiste tu voto.")
+        room.votes[alias] = suspect
+
     def _fill_remaining(self, room: _Room) -> None:
         """Completar con guion al resto de participantes y avanzar la máquina."""
         pending = [
@@ -195,6 +219,9 @@ class FakeSospechAI:
         view: dict = {
             "state": room.state,
             "round_number": room.round_number,
+            "round_prompt": (
+                ROUND_PROMPTS[room.round_number - 1] if room.round_number >= 1 else None
+            ),
             "rounds": room.rounds,
             "max_words": room.max_words,
             "players": list(room.players),
@@ -225,6 +252,7 @@ class FakeSospechAI:
             "valid_game": True,
             "interruption_reason": None,
             "tasa_deteccion": (sum(scores.values()) / len(scores) if scores else None),
+            "prompt_version": "v2",
             "transcript": [
                 {
                     "round_number": message["round_number"],

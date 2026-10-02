@@ -334,7 +334,8 @@ class ImpostorEngineServicer(rpc.ImpostorEngineServicer):
         attempts = getattr(self.client, "attempts", 1)
         prompt_tokens = int(usage.get("prompt_tokens", 0))
         completion_tokens = int(usage.get("completion_tokens", 0))
-        cached_tokens = int(usage.get("cached_tokens", 0))
+        details = usage.get("prompt_tokens_details") or {}
+        cached_tokens = int(details.get("cached_tokens", usage.get("cached_tokens", 0)))
         cost_usd = estimate_cost_usd(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,

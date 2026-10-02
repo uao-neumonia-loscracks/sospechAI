@@ -15,6 +15,7 @@ SCREEN_MODULES = (
     "src.ui.screens.lobby",
     "src.ui.screens.chat",
     "src.ui.screens.voting",
+    "src.ui.screens.revelation",
 )
 
 
@@ -38,7 +39,7 @@ def test_resolve_screen_without_consent_always_returns_consent() -> None:
         ("RONDA", Screen.CHAT),
         ("DISCUSION", Screen.CHAT),
         ("VOTACION", Screen.VOTING),
-        ("REVELACION", Screen.VOTING),
+        ("REVELACION", Screen.REVELATION),
     ],
 )
 def test_resolve_screen_after_consent_maps_state_to_screen(
@@ -53,6 +54,19 @@ def test_resolve_screen_after_consent_maps_state_to_screen(
 
     # Assert
     assert resolved == expected
+
+
+def test_revelacion_es_terminal_y_nunca_cae_en_voting() -> None:
+    """REVELACION es un estado terminal: pantalla dedicada, sin ruta alternativa."""
+    # Arrange
+    consent_agreed = True
+
+    # Act
+    resolved = resolve_screen(consent_agreed=consent_agreed, state="REVELACION")
+
+    # Assert
+    assert resolved == Screen.REVELATION
+    assert resolved not in (Screen.VOTING, Screen.CHAT, Screen.LOBBY)
 
 
 @pytest.mark.parametrize("state", ["RONDA", "DISCUSION", "VOTACION"])

@@ -87,9 +87,11 @@ def request() -> pb.UtteranceRequest:
 
 
 def test_r2_client_consumes_engine_stream_over_real_grpc() -> None:
-    """El cliente real de R2 une los deltas y acepta el cierre vacío."""
+    """El cliente real de R2 une los deltas, acepta el cierre y captura metadata."""
     with serve(FakeStreamClient(["Hola", " mundo"])) as stub:
-        assert EngineClient(stub).generate(request(), timeout=3) == "Hola mundo"
+        generated = EngineClient(stub).generate(request(), timeout=3)
+    assert generated.text == "Hola mundo"
+    assert generated.trailing_metadata != ()
 
 
 def test_trailing_metadata_reaches_r2_stub() -> None:
@@ -112,8 +114,8 @@ def test_word_cut_guard_reaches_r2_before_final_chunk() -> None:
     req = request()
     req.config.max_words = 5
     with serve(fake) as stub:
-        text = EngineClient(stub).generate(req, timeout=3)
-    assert text == "palabra1 palabra2 palabra3 palabra4 palabra5"
+        generated = EngineClient(stub).generate(req, timeout=3)
+    assert generated.text == "palabra1 palabra2 palabra3 palabra4 palabra5"
     assert fake.calls == 1
 
 
@@ -121,9 +123,8 @@ def test_subword_deltas_are_not_lost_by_the_guard() -> None:
     """Fragmentos como 'ía' se conservan aunque no formen una palabra nueva."""
     fake = FakeStreamClient(["Esta", " noche", " leer", "ía", " algunos"])
     with serve(fake) as stub:
-        assert EngineClient(stub).generate(request(), timeout=3) == (
-            "Esta noche leería algunos"
-        )
+        generated = EngineClient(stub).generate(request(), timeout=3)
+    assert generated.text == "Esta noche leería algunos"
 
 
 def test_credits_error_aborts_and_r2_maps_to_engine_rejected() -> None:

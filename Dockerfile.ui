@@ -1,0 +1,26 @@
+# UI de SospechAI: frontend Streamlit que habla solo con el orquestador.
+# Mismo patrón que los Dockerfiles del engine y del orquestador.
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+
+WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1
+
+# Primero las dependencias congeladas (mejor caché de capas).
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Después el código.
+COPY src ./src
+
+EXPOSE 8501
+
+# Entrypoint de Streamlit en modo headless para contenedores: binding 0.0.0.0
+# y sin telemetría/updater. La UI se expone al host; el orquestador queda en
+# la red interna del compose.
+CMD ["uv", "run", "--no-sync", "streamlit", "run", "src/ui/app.py", \
+     "--server.headless", "true", \
+     "--server.address", "0.0.0.0", \
+     "--server.port", "8501"]

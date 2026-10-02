@@ -2,12 +2,26 @@
 
 import math
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Protocol
 
 import grpc
 
 from proto import impostor_pb2 as pb
 from src.orchestrator.game import Game, GameState, RuleViolation
+
+
+@dataclass(frozen=True)
+class Generated:
+    """Respuesta completa del engine con su metadata de uso.
+
+    text es el mensaje publicado en la partida; trailing_metadata conserva
+    los pares (clave, valor) que el engine reporta al cerrar el RPC y que
+    alimentan a EngineUsage.from_trailing_metadata en el cierre del juego.
+    """
+
+    text: str
+    trailing_metadata: tuple[tuple[str, str], ...] = ()
 
 
 class EngineStub(Protocol):
@@ -39,8 +53,13 @@ class EngineClient:
         self.stub = stub
         self.max_chars = max_chars
 
-    def generate(self, request: pb.UtteranceRequest, *, timeout: float) -> str:
-        """Aplicar un deadline a todo el RPC y descartar streams incompletos."""
+    def generate(self, request: pb.UtteranceRequest, *, timeout: float) -> Generated:
+        """Aplicar un deadline al RPC y devolver la respuesta con su metadata.
+
+        Los streams incompletos se descartan. La metadata de uso se lee
+        recién cuando el stream termina y antes de cancelar la llamada; si
+        el doble no ofrece trailing_metadata(), queda vacía.
+        """
         config = request.config
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("El timeout debe ser finito y positivo.")
@@ -75,7 +94,10 @@ class EngineClient:
             text = "".join(parts)
             if not final_seen or not text.strip():
                 raise EngineFailure("engine_protocol")
-            return text
+            metadata = ()
+            if hasattr(call, "trailing_metadata"):
+                metadata = tuple(call.trailing_metadata() or ())
+            return Generated(text=text, trailing_metadata=metadata)
         except grpc.RpcError as error:
             codes = {
                 grpc.StatusCode.DEADLINE_EXCEEDED: "engine_timeout",
@@ -94,8 +116,13 @@ def apply_ai_turn(
     request: pb.UtteranceRequest,
     *,
     timeout: float = 8.0,
-) -> bool:
-    """Publicar una única respuesta o revelar una partida interrumpida por inferencia."""
+) -> Generated | None:
+    """Publicar una única respuesta o revelar una partida interrumpida por inferencia.
+
+    Devuelve la respuesta publicada con su metadata de uso, o None si la
+    partida se interrumpió (fallo del engine, regla violada o ventana
+    vencida); una respuesta rechazada por reglas nunca aporta metadata.
+    """
     expected_round = game.round_number
     game.validate_ai_turn(alias, expected_round)
     if request.config.max_words != game.max_words:
@@ -105,18 +132,18 @@ def apply_ai_turn(
     remaining = game.remaining_time()
     if remaining == 0:
         game.interrupt("round_timeout")
-        return False
+        return None
     budget = min(timeout, remaining) if remaining is not None else timeout
     try:
-        text = client.generate(request, timeout=budget)
+        generated = client.generate(request, timeout=budget)
     except EngineFailure as error:
         if game.state == GameState.ROUND and game.round_number == expected_round:
             game.interrupt(error.code)
-        return False
+        return None
     try:
-        game.submit_message(alias, text, expected_round=expected_round)
+        game.submit_message(alias, generated.text, expected_round=expected_round)
     except RuleViolation:
         if game.state == GameState.ROUND and game.round_number == expected_round:
             game.interrupt("invalid_engine_response")
-        return False
-    return True
+        return None
+    return generated

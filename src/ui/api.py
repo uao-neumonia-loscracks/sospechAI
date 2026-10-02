@@ -29,7 +29,11 @@ class ChatMessage:
 
 @dataclass(frozen=True)
 class StateSnapshot:
-    """Espejo de public_state() (contrato §7.1); en REVELACION incluye `result`."""
+    """Espejo de public_state() (contrato §7.1); en REVELACION incluye `result`.
+
+    `round_prompt` es la pregunta/tema de la ronda vigente: string a partir de
+    `round_number >= 1` (RONDA/DISCUSION/VOTACION/REVELACION) y None en LOBBY.
+    """
 
     state: str
     round_number: int | None
@@ -40,6 +44,7 @@ class StateSnapshot:
     votes_received: int
     remaining_seconds: float | None
     result: dict | None
+    round_prompt: str | None = None
 
     @classmethod
     def from_mapping(cls, raw: dict) -> "StateSnapshot":
@@ -48,6 +53,7 @@ class StateSnapshot:
         return cls(
             state=raw["state"],
             round_number=raw.get("round_number"),
+            round_prompt=raw.get("round_prompt"),
             rounds=raw["rounds"],
             max_words=raw["max_words"],
             players=list(raw["players"]),
@@ -83,6 +89,8 @@ class SospechAI(Protocol):
 
     def submit_message(self, room_code: str, session_token: str, text: str) -> None: ...
 
+    def submit_vote(self, room_code: str, session_token: str, suspect: str) -> None: ...
+
 
 def create_room() -> RoomIdentity:
     """Crear una sala y unirse como anfitrión ("Jugador 1")."""
@@ -112,6 +120,11 @@ def open_voting(room_code: str, session_token: str) -> None:
 def submit_message(room_code: str, session_token: str, text: str) -> None:
     """Enviar un mensaje de ronda validado por la fuente."""
     _source().submit_message(room_code.upper(), session_token, text)
+
+
+def submit_vote(room_code: str, session_token: str, suspect: str) -> None:
+    """Emitir el voto de un humano contra POST /rooms/{code}/votes (contrato §6.6)."""
+    _source().submit_vote(room_code.upper(), session_token, suspect)
 
 
 def _source() -> SospechAI:

@@ -300,6 +300,56 @@ def test_happy_path_emits_trailing_metadata() -> None:
     assert "x-latency-total-ms" in meta
 
 
+def test_cached_tokens_read_from_prompt_tokens_details() -> None:
+    """Los cacheados se leen de prompt_tokens_details cuando llegan anidados."""
+    # Arrange
+    client = FakeStreamClient(["hola"])
+    client.last_usage = {
+        "prompt_tokens": 500,
+        "completion_tokens": 5,
+        "prompt_tokens_details": {"cached_tokens": 120},
+    }
+    servicer = ImpostorEngineServicer(client)
+    context = FakeContext()
+    # Act
+    list(servicer.GenerateUtterance(request(), context))
+    # Assert
+    meta = dict(context.trailing_metadata)
+    assert meta["x-usage-cached-tokens"] == "120"
+
+
+def test_cached_tokens_flat_key_fallback_still_works() -> None:
+    """La clave plana cached_tokens sigue funcionando como respaldo."""
+    # Arrange
+    client = FakeStreamClient(["hola"])
+    client.last_usage = {
+        "prompt_tokens": 500,
+        "completion_tokens": 5,
+        "cached_tokens": 80,
+    }
+    servicer = ImpostorEngineServicer(client)
+    context = FakeContext()
+    # Act
+    list(servicer.GenerateUtterance(request(), context))
+    # Assert
+    meta = dict(context.trailing_metadata)
+    assert meta["x-usage-cached-tokens"] == "80"
+
+
+def test_missing_cached_tokens_emits_zero() -> None:
+    """Sin claves de cacheados el valor emitido es cero y no lanza."""
+    # Arrange
+    client = FakeStreamClient(["hola"])
+    client.last_usage = {"prompt_tokens": 500, "completion_tokens": 5}
+    servicer = ImpostorEngineServicer(client)
+    context = FakeContext()
+    # Act
+    list(servicer.GenerateUtterance(request(), context))
+    # Assert
+    meta = dict(context.trailing_metadata)
+    assert meta["x-usage-cached-tokens"] == "0"
+
+
 def test_error_emits_trailing_metadata_with_status() -> None:
     """El camino de error emite el estado del fallo antes de abortar."""
     client = FakeStreamClient([], error=InferenceError("credits", "agotado"))

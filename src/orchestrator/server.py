@@ -9,20 +9,34 @@ cliente) y el turno de la IA disparado al cerrar los humanos cada ronda.
 
 import argparse
 import json
+import logging
 import os
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import grpc
 
 from proto import impostor_pb2 as pb
 from proto import impostor_pb2_grpc as rpc
 from src.orchestrator.engine_client import EngineClient, apply_ai_turn
-from src.orchestrator.game import Game, RuleViolation, normalize_text
+from src.orchestrator.game import (
+    ABSTAIN_SENTINEL,
+    DEFAULT_PROMPTS,
+    EventSink,
+    Game,
+    GameState,
+    RuleViolation,
+    normalize_text,
+)
 from src.orchestrator.session import IssuedIdentity, Room, SessionStore
+from src.orchestrator.storage import append_game_event
+from src.orchestrator.tracking import EngineUsage, RunParams, log_game_run
+
+logger = logging.getLogger(__name__)
 
 ROUTES = {
     "create": "POST",
@@ -64,21 +78,24 @@ TRANSPORT_MESSAGES = {
     "internal": "Error interno del servidor.",
 }
 
-DEFAULT_PROMPTS = (
-    "¿Qué harías si se va la luz justo antes de entregar un trabajo?",
-    "¿Qué comida escogerías después de una clase larga?",
-)
-
 
 @dataclass(frozen=True)
 class ServerConfig:
-    """Configuración del motor para las peticiones del impostor (R1 hf-router)."""
+    """Configuración del motor para las peticiones del impostor (R1 hf-router).
+
+    provider es el proveedor efectivo detrás del router (un hecho del
+    despliegue, no del motor): el default coincide con la cuenta usada en
+    el experimento y se reemplaza por entorno o línea de comandos.
+    """
 
     temperature: float = 0.9
     top_p: float = 0.9
     system_prompt_version: str = "v2"
     model_id: str = field(
         default_factory=lambda: os.environ.get("SOSPECHAI_MODEL_ID", "")
+    )
+    provider: str = field(
+        default_factory=lambda: os.environ.get("SOSPECHAI_PROVIDER", "featherless-ai")
     )
 
 
@@ -135,10 +152,17 @@ def classify_submit(game: Game, alias: str, text: str) -> str:
 
 
 def classify_vote(game: Game, voter_alias: str, suspect_alias: str) -> str:
-    """Clasificar un RuleViolation de cast_vote con el estado vigente."""
+    """Clasificar un RuleViolation de cast_vote con el estado vigente.
+
+    El sentinel de abstención no es un jugador, así que se considera primero:
+    fuera de VOTACION manda ``wrong_state``; ya dentro, un segundo intento de
+    abstención es ``duplicate_vote`` y nunca cae en ``not_a_player``.
+    """
     snapshot = game.public_state()
     if snapshot["state"] != "VOTACION":
         return "wrong_state"
+    if suspect_alias == ABSTAIN_SENTINEL:
+        return "duplicate_vote"
     if suspect_alias not in snapshot["players"]:
         return "not_a_player"
     if voter_alias == suspect_alias:
@@ -174,8 +198,9 @@ class GameServer(ThreadingHTTPServer):
         clock: Callable[[], float] = time.monotonic,
         game_factory: Callable[[], Game] | None = None,
         timer_tick: float = 0.5,
+        event_sink_factory: Callable[[str], EventSink] | None = None,
     ) -> None:
-        """Guardar sesiones, motor, prompts/ajustes, fábrica de partidas y timer."""
+        """Guardar sesiones, motor, prompts/ajustes, fábrica de partidas y eventos."""
         super().__init__(addr, ApiHandler)
         self.store = store
         self.client = client
@@ -184,10 +209,13 @@ class GameServer(ThreadingHTTPServer):
         self._clock = clock
         self._game_factory = game_factory or (lambda: Game(clock=clock))
         self._timer_tick = timer_tick
+        self._event_sink_factory = event_sink_factory
         self._token_rooms: dict[str, Room] = {}
         self._known_rooms: dict[str, Room] = {}
         self._timer_stop: threading.Event | None = None
         self._timer_thread: threading.Thread | None = None
+        self._usage_by_room: dict[str, list[tuple[str, str]]] = {}
+        self._tracked_rooms: set[str] = set()
 
     def new_game(self) -> Game:
         """Construir la partida con la fábrica inyectada (determinista en pruebas)."""
@@ -202,6 +230,14 @@ class GameServer(ThreadingHTTPServer):
         room = self.store.room(identity.room_code)
         self._token_rooms[identity.session_token] = room
         self._known_rooms[room.code] = room
+
+    def _attach_event_sink(self, room_code: str) -> None:
+        """Ligar el sumidero de la sala al evento del dominio, si hay fábrica."""
+        if self._event_sink_factory is None:
+            return
+        room = self.store.room(room_code)
+        assert room is not None
+        room.game.event_sink = self._event_sink_factory(room_code)
 
     def start_timer(self) -> None:
         """Arrancar el hilo que expira las rondas vencidas del servidor."""
@@ -219,6 +255,47 @@ class GameServer(ThreadingHTTPServer):
             self._timer_thread.join(timeout=5)
             self._timer_thread = None
 
+    def record_usage(self, room: Room, pairs: Sequence[tuple[str, str]]) -> None:
+        """Acumular la metadata de una respuesta publicada para el cierre."""
+        self._usage_by_room.setdefault(room.code, []).extend(pairs)
+
+    def log_finished_game(self, room: Room) -> None:
+        """Registrar la partida terminal en MLflow, una única vez por sala.
+
+        Se invoca bajo room.lock en los puntos que ya producen REVELACION
+        (votos, turno de IA, timer o poll que expire la ronda); el guard de
+        _tracked_rooms hace el registro idempotente. Sin metadata acumulada
+        (partida interrumpida antes de cualquier respuesta exitosa) se
+        registra usage=None: no se inventan ceros.
+        """
+        if room.code in self._tracked_rooms or room.game.state != GameState.REVEAL:
+            return
+        self._tracked_rooms.add(room.code)
+        config = self.config
+        params = RunParams(
+            model_id=config.model_id,
+            engine_backend="hf-router",
+            provider=config.provider,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            system_prompt_version=config.system_prompt_version,
+            max_words=room.game.max_words,
+            n_players=len(room.players) + 1,
+            n_rondas=room.game.rounds,
+        )
+        pairs = self._usage_by_room.get(room.code, [])
+        try:
+            usage = EngineUsage.from_trailing_metadata(pairs) if pairs else None
+        except ValueError as error:
+            logger.error(
+                "Metadata de uso malformada en la sala %s: %s", room.code, error
+            )
+            usage = None
+        try:
+            log_game_run(params=params, result=room.game.result(), usage=usage)
+        except Exception:
+            logger.exception("No se pudo registrar la partida %s en MLflow", room.code)
+
     def _timer_loop(self) -> None:
         """Revisar cada sala conocida y expirar las rondas vencidas bajo su candado."""
         stop = self._timer_stop
@@ -227,6 +304,7 @@ class GameServer(ThreadingHTTPServer):
             for room in list(self._known_rooms.values()):
                 with room.lock:
                     room.game.check_expiration()
+                    self.log_finished_game(room)
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -274,6 +352,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _handle_create(self, _code: str | None) -> None:
         """Fundar una sala y emitir la identidad del anfitrión."""
         identity = self.server.store.create(game=self.server.new_game())
+        self.server._attach_event_sink(identity.room_code)
         self.server.record_token(identity)
         self._send_json(201, self._identity_body(identity))
 
@@ -286,6 +365,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             identity = self.server.store.join(code, game=room.game)
         except RuleViolation as error:
             raise _HttpError("wrong_state", str(error)) from error
+        self.server._attach_event_sink(identity.room_code)
         self.server.record_token(identity)
         self._send_json(201, self._identity_body(identity))
 
@@ -319,6 +399,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 ) from error
             if self._humans_complete(room):
                 self._run_ai_turn(room)
+            self.server.log_finished_game(room)
         self._send_204()
 
     def _handle_open_voting(self, code: str) -> None:
@@ -336,16 +417,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_204()
 
     def _handle_votes(self, code: str) -> None:
-        """Registrar el voto del humano ligado al token."""
+        """Registrar el voto del humano ligado al token (sentinel → abstención)."""
         room, alias = self._resolve_player(code)
         suspect = self._read_suspect_body()
         with room.lock:
             try:
-                room.game.cast_vote(alias, suspect)
+                room.game.cast_vote(
+                    alias, None if suspect == ABSTAIN_SENTINEL else suspect
+                )
             except RuleViolation as error:
                 raise _HttpError(
                     classify_vote(room.game, alias, suspect), str(error)
                 ) from error
+            self.server.log_finished_game(room)
         self._send_204()
 
     def _handle_state(self, code: str) -> None:
@@ -353,6 +437,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         room, _ = self._resolve_player(code)
         with room.lock:
             body = json.dumps(room.game.public_state(), ensure_ascii=False).encode()
+            self.server.log_finished_game(room)
         self._send_bytes(200, body)
 
     # ------------------------------------------------------------------- ayuda
@@ -378,7 +463,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         return all(alias in submitters for alias in room.players.values())
 
     def _run_ai_turn(self, room: Room) -> None:
-        """Publicar una única respuesta del impostor con el motor inyectado."""
+        """Publicar una única respuesta del impostor y acumular su metadata."""
         game = room.game
         request = self._utterance_request(game, room.code)
         ai_alias = next(
@@ -387,9 +472,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             if alias not in room.players.values()
         )
         try:
-            apply_ai_turn(game, ai_alias, self.server.client, request, timeout=8.0)
+            generated = apply_ai_turn(
+                game, ai_alias, self.server.client, request, timeout=8.0
+            )
         except Exception:
             raise _HttpError("internal", TRANSPORT_MESSAGES["internal"]) from None
+        if generated is not None:
+            self.server.record_usage(room, generated.trailing_metadata)
 
     def _utterance_request(self, game: Game, room_code: str) -> pb.UtteranceRequest:
         """Construir la petición del impostor con prompts y configuración inyectados."""
@@ -499,6 +588,11 @@ def _parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("SOSPECHAI_MODEL_ID", ""),
         help="Modelo del engine hf-router.",
     )
+    parser.add_argument(
+        "--provider",
+        default=os.environ.get("SOSPECHAI_PROVIDER", "featherless-ai"),
+        help="Proveedor efectivo detrás del router (p. ej. featherless-ai).",
+    )
     parser.add_argument("--rounds", type=int, default=2, help="Rondas por partida.")
     parser.add_argument(
         "--max-words", type=int, default=15, help="Máximo de palabras por respuesta."
@@ -509,6 +603,11 @@ def _parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
         default=20.0,
         help="Ventana de cada ronda en segundos.",
     )
+    parser.add_argument(
+        "--events-db",
+        default=os.environ.get("SOSPECHAI_EVENTS_DB") or None,
+        help="Ruta sqlite donde anexar los eventos de ciclo de vida.",
+    )
     return parser.parse_args(arguments)
 
 
@@ -516,7 +615,7 @@ def _run_server(options: argparse.Namespace) -> None:
     """Wiring real: gRPC al engine R1, timer y servidor en primer plano."""
     address = os.environ.get("SOSPECHAI_ENGINE_ADDR", "impostor-engine:50051")
     channel = grpc.insecure_channel(address, options=[("grpc.enable_retries", 0)])
-    config = ServerConfig(model_id=options.model_id)
+    config = ServerConfig(model_id=options.model_id, provider=options.provider)
 
     def factory() -> Game:
         """Construir partidas con la configuración pedida en consola."""
@@ -524,7 +623,18 @@ def _run_server(options: argparse.Namespace) -> None:
             rounds=options.rounds,
             max_words=options.max_words,
             round_timeout=options.round_timeout,
+            prompts=DEFAULT_PROMPTS,
         )
+
+    event_sink_factory = None
+    if options.events_db is not None:
+        events_path = Path(options.events_db)
+
+        def event_sink_factory(code: str) -> EventSink:
+            """Construir el sumidero que anexa los eventos de la sala a sqlite."""
+            return lambda event_type, payload: append_game_event(
+                events_path, code, event_type, payload
+            )
 
     server = GameServer(
         (options.host, options.port),
@@ -532,6 +642,7 @@ def _run_server(options: argparse.Namespace) -> None:
         EngineClient(rpc.ImpostorEngineStub(channel)),
         config=config,
         game_factory=factory,
+        event_sink_factory=event_sink_factory,
     )
     server.start_timer()
     try:

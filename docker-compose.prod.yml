@@ -3,7 +3,7 @@ name: sospechai
 services:
   engine:
     image: ${CI_REGISTRY_IMAGE}/engine:${IMAGE_TAG}
-    command: ["uv", "run", "--no-sync", "python", "-m", "src.impostor_engine.no_existe"]
+    command: ["uv", "run", "--no-sync", "python", "-m", "src.impostor_engine.serve"]
     environment:
       HF_TOKEN: ${HF_TOKEN}
     restart: unless-stopped

@@ -249,7 +249,7 @@ def test_create_room_devuelve_anfitrion_en_lobby() -> None:
     snapshot = get_state(host.room_code, host.session_token)
 
     # Assert
-    assert host.room_code.isupper()
+    assert host.room_code == host.room_code.upper()
     assert host.session_token
     assert host.alias == "Jugador 1"
     assert snapshot.state == "LOBBY"
@@ -948,7 +948,7 @@ def test_create_room_mapea_201_sin_token_de_sesion(http_contract: str) -> None:
 
     # Assert
     assert identity.alias == "Jugador 1"
-    assert identity.room_code.isupper()
+    assert identity.room_code == identity.room_code.upper()
     assert identity.session_token
     assert ("POST", "/rooms", None) in _ContractHandler.request_log
 
@@ -965,7 +965,7 @@ def test_join_room_normaliza_a_mayusculas_y_sin_token(http_contract: str) -> Non
 
     # Assert
     assert guest.alias == "Jugador 2"
-    assert guest.room_code.isupper()
+    assert guest.room_code == guest.room_code.upper()
     assert (
         "POST",
         f"/rooms/{host.room_code}/join",
@@ -1198,5 +1198,5 @@ def test_selector_http_usa_sospeschai_orchestrator_url(
 
     # Assert
     assert identity.alias == "Jugador 1"
-    assert identity.room_code.isupper()
+    assert identity.room_code == identity.room_code.upper()
     assert ("POST", "/rooms", None) in _ContractHandler.request_log

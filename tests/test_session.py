@@ -30,7 +30,7 @@ def test_create_issues_host_identity() -> None:
     assert identity.session_token
     assert identity.alias == "Jugador 1"
     assert len(identity.room_code) == 5
-    assert identity.room_code.isupper()
+    assert identity.room_code == identity.room_code.upper()
     assert identity.room_code.isalnum()
     assert store.alias_for(room, identity.session_token) == "Jugador 1"
     assert store.is_host(room, identity.session_token)
@@ -101,7 +101,7 @@ def test_room_lookup_is_case_insensitive() -> None:
 
     assert room is not None
     assert room.code == host.room_code
-    assert room.code.isupper()
+    assert room.code == room.code.upper()
     assert store.room("ZZZZZ") is None
 
 

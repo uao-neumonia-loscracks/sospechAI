@@ -15,7 +15,7 @@ services:
       SOSPECHAI_ENGINE_ADDR: engine:50051
       SOSPECHAI_EVENTS_DB: /app/data/game_events.sqlite3
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      SOSPECHAI_MODEL_ID: ${SOSPECHAI_MODEL_ID:-}
+      SOSPECHAI_MODEL_ID: ${SOSPECHAI_MODEL_ID:-Qwen/Qwen2.5-7B-Instruct:featherless-ai}
       SOSPECHAI_PROVIDER: ${SOSPECHAI_PROVIDER:-featherless-ai}
     volumes:
       - sqlite-data:/app/data

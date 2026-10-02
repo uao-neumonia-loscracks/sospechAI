@@ -333,6 +333,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         except _HttpError as error:
             self._send_error(error)
         except Exception:
+            logger.exception(
+                "Fallo interno sin catalogar en %s %s", self.command, self.path
+            )
             self._send_error(_HttpError("internal", TRANSPORT_MESSAGES["internal"]))
 
     def _route(self) -> None:
@@ -476,6 +479,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 game, ai_alias, self.server.client, request, timeout=8.0
             )
         except Exception:
+            logger.exception(
+                "Turno de la IA fallido en la sala %s: la partida no avanza", room.code
+            )
             raise _HttpError("internal", TRANSPORT_MESSAGES["internal"]) from None
         if generated is not None:
             self.server.record_usage(room, generated.trailing_metadata)
@@ -655,9 +661,15 @@ def _run_server(options: argparse.Namespace) -> None:
         channel.close()
 
 
-def main() -> int:
+def main(arguments: list[str] | None = None) -> int:
     """Ejecutar el servidor real hasta que se interrumpa la consola."""
-    _run_server(_parse_args())
+    options = _parse_args(arguments)
+    if not options.model_id.strip():
+        logger.error(
+            "SOSPECHAI_MODEL_ID vacío: define el modelo del engine antes de arrancar."
+        )
+        return 2
+    _run_server(options)
     return 0
 
 

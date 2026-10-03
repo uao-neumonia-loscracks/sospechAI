@@ -2,6 +2,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/uv-ambiente_100%25-7B3FF2?logo=uv)](https://docs.astral.sh/uv/)
+[![Pipeline](https://gitlab.com/jcmt-group/sospechAI/badges/main/pipeline.svg)](https://gitlab.com/jcmt-group/sospechAI/-/pipelines)
 [![Tests](https://img.shields.io/badge/tests-426_passing-2ea44f)](https://github.com/uao-neumonia-loscracks/sospechAI)
 [![Ruff](https://img.shields.io/badge/ruff-clean-D7FF64?logo=ruff)](https://github.com/astral-sh/ruff)
 [![Black](https://img.shields.io/badge/black-formatted-000000?logo=black)](https://black.readthedocs.io/)
@@ -113,6 +114,12 @@ uv run python scripts/validate_proto.py
 Estado verificado el 19 de septiembre de 2026: 426 pruebas, todas en verde y sin warnings (pytest corre con `filterwarnings` en modo error); ruff y black sin hallazgos; el `.proto` compila. Las pruebas nunca llaman a la API real de Hugging Face.
 
 El tracking con MLflow registra un run por partida terminada cuando `MLFLOW_TRACKING_URI` está definida (en el compose del M3, `http://mlflow:5000`): params (modelo, proveedor, temperatura, max_words, jugadores, rondas), métricas (tasa de detección, latencia p95, tokens, costo estimado), artefactos (transcript anónimo y matriz de votos) y tags de trazabilidad (licencia, equipo, ambiente, módulo).
+
+## Despliegue
+
+La versión de `main` se despliega automáticamente a producción (Droplet Ubuntu 22.04) con pipeline GitLab CI: test → build → deploy con smoke test y rollback automático. La app corre en **http://198.211.107.154**.
+
+Documentación completa — arquitectura, pipeline, smoke test, rollback, secretos, MLflow y operación manual: [`docs/despliegue.md`](docs/despliegue.md).
 
 ## Documentación
 

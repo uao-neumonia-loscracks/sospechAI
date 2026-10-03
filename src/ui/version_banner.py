@@ -8,7 +8,7 @@ que el pipeline de deploy inyecta (CI_COMMIT_SHORT_SHA); sin la variable
 
 import os
 
-BANNER_TEXT = "SospechAI · despliegue aen vivo en clase"
+BANNER_TEXT = "SospechAI · despliegue en vivo en clase"
 
 
 def version_label(environ: dict[str, str] | None = None) -> str:
